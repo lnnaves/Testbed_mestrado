@@ -13,6 +13,8 @@ Neste projeto:
 """
 
 from time import sleep
+import os
+import shutil
 
 from containernet.net import Containernet
 from containernet.node import DockerSta
@@ -80,6 +82,13 @@ def add_access_point(net):
     return ap1
 
 
+def add_group_ap(net):
+    """
+    Alias para add_access_point para compatibilidade com topologias.
+    """
+    return add_access_point(net)
+
+
 def add_drone(
     net,
     name,
@@ -89,7 +98,9 @@ def add_drone(
     image=DRONE_IMAGE,
     range_=90,
     cpu_shares=128,
-    mem_limit="256m"
+    mem_limit="256m",
+    compromised=None,
+    **kwargs
 ):
     """
     Cria um drone como container Docker + estação Wi-Fi.
@@ -101,6 +112,15 @@ def add_drone(
 
     info(f"*** Adding drone container station: {name}, role={role}\n")
 
+    env = {
+        "NODE_TYPE": "drone",
+        "DRONE_ID": name,
+        "DRONE_ROLE": role
+    }
+    
+    if compromised:
+        env["COMPROMISED"] = compromised
+
     drone = net.addStation(
         name,
         cls=DockerSta,
@@ -110,11 +130,7 @@ def add_drone(
         range=range_,
         cpu_shares=cpu_shares,
         mem_limit=mem_limit,
-        environment={
-            "NODE_TYPE": "drone",
-            "DRONE_ID": name,
-            "DRONE_ROLE": role
-        }
+        environment=env
     )
 
     return drone
@@ -177,6 +193,25 @@ def configure_wifi_and_links(net, stations, ap):
         net.addLink(sta, ap)
 
 
+def configure_and_start(net):
+    """
+    Configura e inicia a rede.
+    """
+    info("*** Configuring WiFi nodes\n")
+    net.configureWifiNodes()
+
+    info("*** Starting network\n")
+    net.build()
+
+    for controller in net.controllers:
+        controller.start()
+
+    for ap in net.aps:
+        ap.start(net.controllers)
+
+    info("*** Network started\n")
+
+
 def start_network(net):
     info("*** Starting network\n")
     net.build()
@@ -208,15 +243,18 @@ def prepare_all(nodes, scenario):
 
 
 # ============================================================
-# Hooks de protocolo
+# Hooks de protocolo - Autenticação
 # ============================================================
 
-def start_auth_server(auth, scenario):
+def start_auth_server(auth, scenario=None, scenario_name=None):
     """
     Inicia o servidor/autoridade do protocolo pronto.
 
     Substitua os argumentos pelo protocolo real.
     """
+    # Aceita tanto 'scenario' quanto 'scenario_name' como parâmetro
+    scenario = scenario or scenario_name or "default"
+    
     info(f"*** Starting auth server in container {auth.name}\n")
 
     auth.cmd(
@@ -259,6 +297,13 @@ def request_join(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     )
 
 
+def start_join_request(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
+    """
+    Alias para request_join para compatibilidade.
+    """
+    return request_join(drone, auth_ip, group_id)
+
+
 def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     info(f"*** {drone.name} requesting leave\n")
 
@@ -273,6 +318,13 @@ def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     )
 
 
+def start_leave_request(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
+    """
+    Alias para request_leave para compatibilidade.
+    """
+    return request_leave(drone, auth_ip, group_id)
+
+
 def revoke_member(auth, target, group_id="mission-alpha"):
     info(f"*** Revoking {target}\n")
 
@@ -284,6 +336,13 @@ def revoke_member(auth, target, group_id="mission-alpha"):
         f"--group-id {group_id} "
         f"> /tmp/drone-logs/revoke-{target}.log 2>&1 &"
     )
+
+
+def start_revocation(auth, revoked_drone_id, group_id="mission-alpha"):
+    """
+    Alias para revoke_member para compatibilidade.
+    """
+    return revoke_member(auth, revoked_drone_id, group_id)
 
 
 # ============================================================
@@ -301,6 +360,13 @@ def start_receiver(drone, port=5001):
     )
 
 
+def start_group_traffic_receiver(drone, port=5001):
+    """
+    Alias para start_receiver para compatibilidade.
+    """
+    return start_receiver(drone, port)
+
+
 def start_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
     info(f"*** Starting sender on {drone.name}\n")
 
@@ -312,6 +378,13 @@ def start_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
         f"--rate {rate} "
         f"> /tmp/drone-logs/traffic-sender.log 2>&1 &"
     )
+
+
+def start_group_traffic_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
+    """
+    Alias para start_sender para compatibilidade.
+    """
+    return start_sender(drone, dst, port, rate)
 
 
 def start_malicious_traffic(drone, dst="10.0.0.255", port=5001):
@@ -356,10 +429,47 @@ def wait(seconds, message):
     sleep(seconds)
 
 
-def finish(net, cli=True):
+def wait_event(seconds, message):
+    """
+    Alias para wait para compatibilidade.
+    """
+    return wait(seconds, message)
+
+
+def dump_logs_to_host(nodes, scenario):
+    """
+    Copia logs dos containers para o host.
+    """
+    info(f"*** Dumping logs for scenario: {scenario}\n")
+    
+    for node in nodes:
+        log_dir = f"/tmp/drone-logs-{scenario}-{node.name}"
+        try:
+            # Cria diretório no host
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Copia logs do container
+            node.cmd(f"cp /tmp/drone-logs/* {log_dir}/ 2>/dev/null || true")
+            
+            info(f"*** Logs from {node.name} copied to {log_dir}\n")
+        except Exception as e:
+            info(f"*** Error copying logs from {node.name}: {e}\n")
+
+
+def open_cli_or_stop(net, cli=True):
+    """
+    Abre CLI ou apenas para a rede.
+    """
     if cli:
         info("*** Opening CLI\n")
         CLI(net)
 
     info("*** Stopping network\n")
     net.stop()
+
+
+def finish(net, cli=True):
+    """
+    Encerra a rede. Alias para open_cli_or_stop para compatibilidade.
+    """
+    open_cli_or_stop(net, cli)
