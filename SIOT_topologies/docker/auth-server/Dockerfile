@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /opt/drone-sec
 
-COPY SIOT_topologies/scripts/ /opt/drone-sec/bin/
+COPY scripts/ /opt/drone-sec/bin/
 
 RUN chmod +x /opt/drone-sec/bin/*
 
