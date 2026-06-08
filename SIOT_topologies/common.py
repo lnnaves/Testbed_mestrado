@@ -405,13 +405,18 @@ def start_malicious_traffic(drone, dst="10.0.0.255", port=5001):
 # ============================================================
 
 def start_metrics(node, scenario):
+    """
+    Inicia coleta de métricas dentro do container.
+    
+    As métricas são enviadas para stdout do Mininet, permitindo 
+    capturar tudo em um arquivo CSV consolidado.
+    """
     info(f"*** Starting metrics on {node.name}\n")
 
     node.cmd(
         f"{METRICS_BIN} "
         f"--scenario {scenario} "
-        f"--node {node.name} "
-        f"> /tmp/drone-logs/metrics.log 2>&1 &"
+        f"--node {node.name} &"
     )
 
 
