@@ -10,37 +10,26 @@ def now():
     return datetime.utcnow().isoformat() + "Z"
 
 
-def read_first_line(path, default="0"):
-    try:
-        with open(path, "r") as f:
-            return f.readline().strip()
-    except Exception:
-        return default
-
-
-def read_int(path):
-    try:
-        return int(read_first_line(path, "0"))
-    except Exception:
-        return 0
-
-
 def read_proc_stat():
     """
     Retorna total e idle ticks da CPU.
     """
-    line = read_first_line("/proc/stat", "")
+    try:
+        with open("/proc/stat", "r") as f:
+            line = f.readline().strip()
+        
+        if not line.startswith("cpu "):
+            return 0, 0
 
-    if not line.startswith("cpu "):
+        parts = line.split()
+        values = [int(x) for x in parts[1:]]
+
+        idle = values[3] + values[4]
+        total = sum(values)
+
+        return total, idle
+    except Exception:
         return 0, 0
-
-    parts = line.split()
-    values = [int(x) for x in parts[1:]]
-
-    idle = values[3] + values[4]
-    total = sum(values)
-
-    return total, idle
 
 
 def cpu_usage_percent(prev_total, prev_idle, curr_total, curr_idle):
@@ -77,41 +66,70 @@ def read_memory_info():
     return total, available, used
 
 
-def read_network_stats():
+def read_network_stats_from_proc():
     """
-    Lê estatísticas em /sys/class/net.
-    Retorna uma lista com métricas por interface.
+    Lê estatísticas de rede de /proc/net/dev.
+    Funciona melhor dentro de containers.
+    
+    Formato de /proc/net/dev:
+    Inter-|   Receive                                                |  Transmit
+     face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+        lo: 1234     5678    0    0    0     0          0         0     1234     5678    0    0    0     0       0          0
+      eth0: 9876     1234    0    0    0     0          0         0     5432      432    0    0    0     0       0          0
     """
     results = []
 
-    base = "/sys/class/net"
-
-    if not os.path.isdir(base):
-        return results
-
-    for iface in sorted(os.listdir(base)):
-        if iface == "lo":
-            continue
-
-        stats_dir = os.path.join(base, iface, "statistics")
-
-        rx_bytes = read_int(os.path.join(stats_dir, "rx_bytes"))
-        tx_bytes = read_int(os.path.join(stats_dir, "tx_bytes"))
-        rx_packets = read_int(os.path.join(stats_dir, "rx_packets"))
-        tx_packets = read_int(os.path.join(stats_dir, "tx_packets"))
-        rx_errors = read_int(os.path.join(stats_dir, "rx_errors"))
-        tx_errors = read_int(os.path.join(stats_dir, "tx_errors"))
-
-        results.append({
-            "iface": iface,
-            "rx_bytes": rx_bytes,
-            "tx_bytes": tx_bytes,
-            "rx_packets": rx_packets,
-            "tx_packets": tx_packets,
-            "rx_errors": rx_errors,
-            "tx_errors": tx_errors,
-        })
-
+    try:
+        with open("/proc/net/dev", "r") as f:
+            lines = f.readlines()
+        
+        # Skip first 2 header lines
+        for line in lines[2:]:
+            if ":" not in line:
+                continue
+            
+            iface, data = line.split(":", 1)
+            iface = iface.strip()
+            
+            if iface == "lo":
+                continue
+            
+            parts = data.split()
+            
+            if len(parts) < 16:
+                continue
+            
+            try:
+                rx_bytes = int(parts[0])
+                rx_packets = int(parts[1])
+                rx_errors = int(parts[2])
+                rx_dropped = int(parts[3])
+                
+                # Transmit starts at index 8
+                tx_bytes = int(parts[8])
+                tx_packets = int(parts[9])
+                tx_errors = int(parts[10])
+                tx_dropped = int(parts[11])
+                
+                results.append({
+                    "iface": iface,
+                    "rx_bytes": rx_bytes,
+                    "tx_bytes": tx_bytes,
+                    "rx_packets": rx_packets,
+                    "tx_packets": tx_packets,
+                    "rx_errors": rx_errors,
+                    "tx_errors": tx_errors,
+                    "rx_dropped": rx_dropped,
+                    "tx_dropped": tx_dropped,
+                })
+            except (ValueError, IndexError):
+                continue
+    
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Error reading /proc/net/dev: {e}", flush=True)
+    
     return results
 
 
@@ -130,13 +148,15 @@ def print_header():
         "rx_packets,"
         "tx_packets,"
         "rx_errors,"
-        "tx_errors",
+        "tx_errors,"
+        "rx_dropped,"
+        "tx_dropped",
         flush=True
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Simple metrics collector")
+    parser = argparse.ArgumentParser(description="Metrics collector for Containernet containers")
 
     parser.add_argument("--scenario", default="default")
     parser.add_argument("--node", default="unknown")
@@ -156,9 +176,10 @@ def main():
         prev_total, prev_idle = curr_total, curr_idle
 
         mem_total, mem_available, mem_used = read_memory_info()
-        net_stats = read_network_stats()
+        net_stats = read_network_stats_from_proc()
 
         if not net_stats:
+            # Se nenhuma interface foi encontrada, imprime uma linha genérica
             print(
                 f"{now()},"
                 f"{args.scenario},"
@@ -167,7 +188,7 @@ def main():
                 f"{mem_total},"
                 f"{mem_available},"
                 f"{mem_used},"
-                f"NA,0,0,0,0,0,0",
+                f"NA,0,0,0,0,0,0,0,0",
                 flush=True
             )
         else:
@@ -186,7 +207,9 @@ def main():
                     f"{stat['rx_packets']},"
                     f"{stat['tx_packets']},"
                     f"{stat['rx_errors']},"
-                    f"{stat['tx_errors']}",
+                    f"{stat['tx_errors']},"
+                    f"{stat['rx_dropped']},"
+                    f"{stat['tx_dropped']}",
                     flush=True
                 )
 
