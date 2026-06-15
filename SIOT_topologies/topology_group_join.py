@@ -4,23 +4,9 @@
 topology_group_join.py
 
 Cenário:
-- Grupo inicial já autenticado.
-- Um novo drone entra no grupo durante a missão.
-
-Objetivo:
-- Avaliar impacto da entrada dinâmica de um novo drone.
-- Medir tempo de join, rekeying e impacto no tráfego dos membros existentes.
-
-Evento principal:
+- Grupo inicial em rede ad hoc.
+- drone4 começa fora do alcance.
 - drone4 entra no alcance e solicita entrada no grupo.
-
-Métricas:
-- Tempo de join.
-- Tempo de rekeying.
-- Perda durante admissão.
-- Interrupção do tráfego.
-- Mensagens de controle.
-- CPU/memória durante o evento.
 """
 
 from mininet.log import setLogLevel, info
@@ -28,111 +14,126 @@ from mininet.log import setLogLevel, info
 from common import (
     create_network,
     add_controller,
-    add_group_ap,
     add_auth_server,
     add_drone,
-    configure_and_start,
+    configure_adhoc_network,
+    start_network,
     prepare_all,
+    start_metrics_all,
     start_auth_server,
     start_group_member,
-    start_join_request,
-    start_group_traffic_receiver,
-    start_group_traffic_sender,
-    start_metrics_all,
-    wait_event,
-    dump_logs_to_host,
-    open_cli_or_stop
+    request_join,
+    start_receiver,
+    start_sender,
+    test_connectivity,
+    wait,
+    finish
 )
 
 
-SCENARIO = "group_join"
+SCENARIO = "group_join_adhoc"
 
 
 def run(cli=True):
     net = create_network()
 
-    info("*** Creating group join scenario\n")
+    info("*** Creating group join over ad hoc network\n")
 
     add_controller(net)
-    add_group_ap(net)
 
-    auth = add_auth_server(net, name="auth", ip="10.0.0.100/24")
+    auth = add_auth_server(
+        net,
+        name="auth1",
+        ip="10.0.0.100/24",
+        position="50,50,0",
+        range_=130
+    )
 
-    # Grupo inicial
     drone1 = add_drone(
         net,
         name="drone1",
         ip="10.0.0.1/24",
-        position="30,50,0",
-        role="initial_member"
+        position="35,50,0",
+        role="initial_member",
+        range_=100
     )
 
     drone2 = add_drone(
         net,
         name="drone2",
         ip="10.0.0.2/24",
-        position="40,60,0",
-        role="initial_member"
+        position="45,60,0",
+        role="initial_member",
+        range_=100
     )
 
     drone3 = add_drone(
         net,
         name="drone3",
         ip="10.0.0.3/24",
-        position="60,60,0",
-        role="initial_member"
+        position="60,55,0",
+        role="initial_member",
+        range_=100
     )
 
-    # Novo drone: começa distante ou logicamente fora do grupo.
-    # A posição pode ser ajustada para simular entrada no alcance.
+    # Começa distante, fora do alcance prático.
     drone4 = add_drone(
         net,
         name="drone4",
         ip="10.0.0.4/24",
-        position="180,180,0",
-        role="joining_member"
+        position="220,220,0",
+        role="joining_member",
+        range_=100
     )
 
-    nodes = [auth, drone1, drone2, drone3, drone4]
+    stations = [auth, drone1, drone2, drone3, drone4]
+    initial_drones = [drone1, drone2, drone3]
 
-    configure_and_start(net)
-    prepare_all(nodes, SCENARIO)
+    configure_adhoc_network(
+        net,
+        stations,
+        ssid="drone-adhoc-net",
+        channel=5,
+        mode="g"
+    )
 
-    start_metrics_all(nodes, SCENARIO)
+    start_network(net)
 
-    # t=2: autoridade inicia
-    wait_event(2, "starting central authority")
-    start_auth_server(auth, scenario_name=SCENARIO)
+    prepare_all(stations, SCENARIO)
+    start_metrics_all(stations, SCENARIO)
 
-    # t=5: grupo inicial é autenticado
-    wait_event(3, "forming initial group")
-    for drone in [drone1, drone2, drone3]:
+    wait(3, "testing initial ad hoc connectivity")
+    test_connectivity([auth, drone1, drone2, drone3])
+
+    wait(2, "starting central authority")
+    start_auth_server(auth, SCENARIO)
+
+    wait(3, "forming initial group")
+    for drone in initial_drones:
         start_group_member(drone)
 
-    # t=15: tráfego normal do grupo inicial
-    wait_event(10, "starting traffic for initial group")
-    for drone in [drone1, drone2, drone3]:
-        start_group_traffic_receiver(drone)
+    wait(10, "starting initial group traffic")
+    for drone in initial_drones:
+        start_receiver(drone)
 
-    start_group_traffic_sender(drone1, dst="10.0.0.255", port=5001, rate="10pps")
+    start_sender(drone1, dst="10.0.0.255", port=5001, rate="10pps")
 
-    # t=30: drone4 entra fisicamente no alcance
-    wait_event(15, "moving new drone into group range")
+    wait(15, "moving drone4 into ad hoc network range")
     drone4.setPosition("75,55,0")
 
-    # t=35: drone4 solicita entrada
-    wait_event(5, "drone4 requesting group join")
-    start_group_traffic_receiver(drone4)
-    start_join_request(drone4)
+    wait(5, "testing connectivity after drone4 movement")
+    test_connectivity([auth, drone1, drone2, drone3, drone4])
 
-    # t=50: tráfego continua já com drone4 no grupo
-    wait_event(15, "collecting metrics after join")
-    start_group_traffic_sender(drone2, dst="10.0.0.255", port=5001, rate="10pps")
+    wait(2, "drone4 requests group join")
+    start_receiver(drone4)
+    request_join(drone4)
 
-    wait_event(20, "final measurement window")
+    wait(20, "measurement after join")
+    start_sender(drone2, dst="10.0.0.255", port=5001, rate="10pps")
 
-    dump_logs_to_host(nodes, SCENARIO)
-    open_cli_or_stop(net, cli=cli)
+    wait(20, "final measurement window")
+
+    finish(net, cli=cli)
 
 
 if __name__ == "__main__":

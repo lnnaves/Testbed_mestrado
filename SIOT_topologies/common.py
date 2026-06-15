@@ -3,18 +3,16 @@
 """
 common.py
 
-Funções comuns para os cenários de autenticação em grupo.
+Funções comuns para cenários de autenticação em grupo em redes de drones.
 
-Neste projeto:
-- cada drone é um container Docker;
-- cada drone também é uma estação Wi-Fi do Mininet-WiFi;
-- os protocolos de autenticação rodam dentro do container;
-- a rede wireless é emulada pelo Mininet-WiFi/Containernet.
+Modelo usado:
+- Cada drone é um container Docker.
+- Cada drone é uma estação Wi-Fi do Mininet-WiFi.
+- A rede é ad hoc, sem Access Point.
+- A autoridade central é lógica, não infraestrutura wireless.
 """
 
 from time import sleep
-import os
-import shutil
 
 from containernet.net import Containernet
 from containernet.node import DockerSta
@@ -22,6 +20,8 @@ from containernet.cli import CLI
 
 from mininet.node import Controller
 from mininet.log import info
+
+from mn_wifi.link import adhoc
 
 
 # ============================================================
@@ -43,50 +43,33 @@ MALICIOUS_BIN = "/opt/drone-sec/bin/malicious-agent"
 
 
 # ============================================================
-# Criação da rede
+# Rede
 # ============================================================
 
 def create_network():
     """
-    Cria uma rede Containernet com suporte às estações Wi-Fi.
+    Cria a rede Containernet com suporte a estações Wi-Fi containerizadas.
     """
     net = Containernet(
         controller=Controller,
         autoSetMacs=True,
         autoStaticArp=True
     )
+
+    # Modelo simples de propagação.
+    # Pode ser ajustado depois para logDistance, friis etc.
+    net.setPropagationModel(model="logDistance", exp=2.5)
+
     return net
 
 
 def add_controller(net):
+    """
+    Controlador mínimo para inicialização da rede.
+    Mesmo sem AP, manter controlador normalmente não atrapalha.
+    """
     info("*** Adding controller\n")
     return net.addController("c0")
-
-
-def add_access_point(net):
-    """
-    Ponto de acesso sem fio usado para conectar os drones.
-    Para o artigo, ele representa a infraestrutura wireless emulada.
-    """
-    info("*** Adding access point\n")
-
-    ap1 = net.addAccessPoint(
-        "ap1",
-        ssid="drone-group-net",
-        mode="g",
-        channel="1",
-        position="50,50,0",
-        range=130
-    )
-
-    return ap1
-
-
-def add_group_ap(net):
-    """
-    Alias para add_access_point para compatibilidade com topologias.
-    """
-    return add_access_point(net)
 
 
 def add_drone(
@@ -96,41 +79,36 @@ def add_drone(
     position,
     role="member",
     image=DRONE_IMAGE,
-    range_=90,
+    range_=100,
     cpu_shares=128,
-    mem_limit="256m",
-    compromised=None,
-    **kwargs
+    mem_limit="256m"
 ):
     """
     Cria um drone como container Docker + estação Wi-Fi.
 
-    Este é o ponto mais importante:
-    - cls=DockerSta transforma a estação Wi-Fi em container Docker.
-    - dimage define a imagem com os protocolos instalados.
+    Ponto importante:
+    - cls=DockerSta: o drone é um container.
+    - wlans=1: uma interface wireless.
+    - position/range: usados pelo Mininet-WiFi para conectividade.
     """
 
     info(f"*** Adding drone container station: {name}, role={role}\n")
-
-    env = {
-        "NODE_TYPE": "drone",
-        "DRONE_ID": name,
-        "DRONE_ROLE": role
-    }
-    
-    if compromised:
-        env["COMPROMISED"] = compromised
 
     drone = net.addStation(
         name,
         cls=DockerSta,
         dimage=image,
         ip=ip,
+        wlans=1,
         position=position,
         range=range_,
         cpu_shares=cpu_shares,
         mem_limit=mem_limit,
-        environment=env
+        environment={
+            "NODE_TYPE": "drone",
+            "DRONE_ID": name,
+            "DRONE_ROLE": role
+        }
     )
 
     return drone
@@ -138,33 +116,31 @@ def add_drone(
 
 def add_auth_server(
     net,
-    name="auth",
+    name="auth1",
     ip="10.0.0.100/24",
-    position="50,45,0",
-    image=AUTH_IMAGE
+    position="50,50,0",
+    image=AUTH_IMAGE,
+    range_=120
 ):
     """
-    Cria a autoridade central também como container wireless.
+    Cria a autoridade central como container + estação Wi-Fi.
 
-    Você pode interpretar este nó como:
-    - GCS;
-    - servidor de autenticação;
-    - KDC;
-    - controlador de grupo;
-    - autoridade da missão.
-
-    Ele também é DockerSta para manter tudo containerizado.
+    Neste modelo:
+    - auth é uma autoridade lógica.
+    - auth NÃO é AP.
+    - auth participa da rede ad hoc como qualquer outro nó.
     """
 
-    info(f"*** Adding central authority container station: {name}\n")
+    info(f"*** Adding central authority as DockerSta: {name}\n")
 
     auth = net.addStation(
         name,
         cls=DockerSta,
         dimage=image,
         ip=ip,
+        wlans=1,
         position=position,
-        range=130,
+        range=range_,
         cpu_shares=256,
         mem_limit="512m",
         environment={
@@ -176,51 +152,52 @@ def add_auth_server(
     return auth
 
 
-def configure_wifi_and_links(net, stations, ap):
+def configure_adhoc_network(
+    net,
+    stations,
+    ssid="drone-adhoc-net",
+    channel=5,
+    mode="g",
+    proto="batman_adv"
+):
     """
-    Configura os nós Wi-Fi e associa as estações ao AP.
+    Configura todos os nós em uma mesma rede ad hoc.
 
-    No exemplo oficial do Containernet com Mininet-WiFi,
-    as estações DockerSta são criadas com addStation e associadas
-    ao AP usando addLink(sta, ap).
+    Este é o substituto do AP.
+
+    Todos os drones e o auth entram no mesmo IBSS/ad hoc SSID.
     """
 
     info("*** Configuring WiFi nodes\n")
     net.configureWifiNodes()
 
-    info("*** Associating stations to AP\n")
+    info("*** Configuring ad hoc wireless network\n")
+
     for sta in stations:
-        net.addLink(sta, ap)
+        intf = f"{sta.name}-wlan0"
 
+        info(f"*** Adding ad hoc link for {sta.name} on {intf}\n")
 
-def configure_and_start(net):
-    """
-    Configura e inicia a rede.
-    """
-    info("*** Configuring WiFi nodes\n")
-    net.configureWifiNodes()
-
-    info("*** Starting network\n")
-    net.build()
-
-    for controller in net.controllers:
-        controller.start()
-
-    for ap in net.aps:
-        ap.start(net.controllers)
-
-    info("*** Network started\n")
+        net.addLink(
+            sta,
+            cls=adhoc,
+            intf=intf,
+            ssid=ssid,
+            mode=mode,
+            channel=channel
+        )
 
 
 def start_network(net):
-    info("*** Starting network\n")
+    """
+    Inicia a rede.
+    """
+
+    info("*** Building network\n")
     net.build()
 
     for controller in net.controllers:
         controller.start()
-
-    for ap in net.aps:
-        ap.start(net.controllers)
 
     info("*** Network started\n")
 
@@ -233,8 +210,10 @@ def prepare_node(node, scenario):
     node.cmd("mkdir -p /tmp/drone-logs")
     node.cmd(f"echo scenario={scenario} > /tmp/drone-logs/context.txt")
     node.cmd(f"echo node={node.name} >> /tmp/drone-logs/context.txt")
+    node.cmd("hostname >> /tmp/drone-logs/context.txt")
     node.cmd("ip addr >> /tmp/drone-logs/context.txt")
     node.cmd("ip route >> /tmp/drone-logs/context.txt")
+    node.cmd("iw dev >> /tmp/drone-logs/context.txt 2>&1")
 
 
 def prepare_all(nodes, scenario):
@@ -243,19 +222,15 @@ def prepare_all(nodes, scenario):
 
 
 # ============================================================
-# Hooks de protocolo - Autenticação
+# Protocolo de autenticação em grupo
 # ============================================================
 
-def start_auth_server(auth, scenario=None, scenario_name=None):
+def start_auth_server(auth, scenario):
     """
-    Inicia o servidor/autoridade do protocolo pronto.
+    Inicia a autoridade central dentro do container auth.
+    """
 
-    Substitua os argumentos pelo protocolo real.
-    """
-    # Aceita tanto 'scenario' quanto 'scenario_name' como parâmetro
-    scenario = scenario or scenario_name or "default"
-    
-    info(f"*** Starting auth server in container {auth.name}\n")
+    info(f"*** Starting auth server in {auth.name}\n")
 
     auth.cmd(
         f"{PROTOCOL_BIN} "
@@ -269,9 +244,10 @@ def start_auth_server(auth, scenario=None, scenario_name=None):
 
 def start_group_member(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     """
-    Inicia o cliente/membro do protocolo de grupo.
+    Inicia o protocolo no drone como membro do grupo.
     """
-    info(f"*** Starting group protocol in {drone.name}\n")
+
+    info(f"*** Starting group member protocol in {drone.name}\n")
 
     drone.cmd(
         f"{PROTOCOL_BIN} "
@@ -284,7 +260,11 @@ def start_group_member(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
 
 
 def request_join(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
-    info(f"*** {drone.name} requesting join\n")
+    """
+    Solicitação de entrada no grupo.
+    """
+
+    info(f"*** {drone.name} requesting group join\n")
 
     drone.cmd(
         f"{PROTOCOL_BIN} "
@@ -297,15 +277,12 @@ def request_join(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     )
 
 
-def start_join_request(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
-    """
-    Alias para request_join para compatibilidade.
-    """
-    return request_join(drone, auth_ip, group_id)
-
-
 def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
-    info(f"*** {drone.name} requesting leave\n")
+    """
+    Solicitação de saída voluntária.
+    """
+
+    info(f"*** {drone.name} requesting group leave\n")
 
     drone.cmd(
         f"{PROTOCOL_BIN} "
@@ -318,14 +295,11 @@ def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
     )
 
 
-def start_leave_request(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
-    """
-    Alias para request_leave para compatibilidade.
-    """
-    return request_leave(drone, auth_ip, group_id)
-
-
 def revoke_member(auth, target, group_id="mission-alpha"):
+    """
+    Revogação disparada pela autoridade central.
+    """
+
     info(f"*** Revoking {target}\n")
 
     auth.cmd(
@@ -334,23 +308,17 @@ def revoke_member(auth, target, group_id="mission-alpha"):
         f"--event revoke "
         f"--target {target} "
         f"--group-id {group_id} "
+        f"--auth-server 127.0.0.1:9000 "
         f"> /tmp/drone-logs/revoke-{target}.log 2>&1 &"
     )
 
 
-def start_revocation(auth, revoked_drone_id, group_id="mission-alpha"):
-    """
-    Alias para revoke_member para compatibilidade.
-    """
-    return revoke_member(auth, revoked_drone_id, group_id)
-
-
 # ============================================================
-# Hooks de tráfego
+# Tráfego
 # ============================================================
 
 def start_receiver(drone, port=5001):
-    info(f"*** Starting receiver on {drone.name}\n")
+    info(f"*** Starting traffic receiver on {drone.name}\n")
 
     drone.cmd(
         f"{TRAFFIC_BIN} "
@@ -360,15 +328,8 @@ def start_receiver(drone, port=5001):
     )
 
 
-def start_group_traffic_receiver(drone, port=5001):
-    """
-    Alias para start_receiver para compatibilidade.
-    """
-    return start_receiver(drone, port)
-
-
 def start_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
-    info(f"*** Starting sender on {drone.name}\n")
+    info(f"*** Starting traffic sender on {drone.name}\n")
 
     drone.cmd(
         f"{TRAFFIC_BIN} "
@@ -380,15 +341,8 @@ def start_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
     )
 
 
-def start_group_traffic_sender(drone, dst="10.0.0.255", port=5001, rate="10pps"):
-    """
-    Alias para start_sender para compatibilidade.
-    """
-    return start_sender(drone, dst, port, rate)
-
-
 def start_malicious_traffic(drone, dst="10.0.0.255", port=5001):
-    info(f"*** Starting malicious behavior on {drone.name}\n")
+    info(f"*** Starting malicious traffic on {drone.name}\n")
 
     drone.cmd(
         f"{MALICIOUS_BIN} "
@@ -405,18 +359,13 @@ def start_malicious_traffic(drone, dst="10.0.0.255", port=5001):
 # ============================================================
 
 def start_metrics(node, scenario):
-    """
-    Inicia coleta de métricas dentro do container.
-    
-    As métricas são enviadas para stdout do Mininet, permitindo 
-    capturar tudo em um arquivo CSV consolidado.
-    """
     info(f"*** Starting metrics on {node.name}\n")
 
     node.cmd(
         f"{METRICS_BIN} "
         f"--scenario {scenario} "
-        f"--node {node.name} &"
+        f"--node {node.name} "
+        f"> /tmp/drone-logs/metrics.log 2>&1 &"
     )
 
 
@@ -434,47 +383,28 @@ def wait(seconds, message):
     sleep(seconds)
 
 
-def wait_event(seconds, message):
+def test_connectivity(nodes):
     """
-    Alias para wait para compatibilidade.
+    Teste básico de conectividade.
+    Útil para validar a rede ad hoc antes de iniciar protocolo.
     """
-    return wait(seconds, message)
 
+    info("*** Testing basic ad hoc connectivity\n")
 
-def dump_logs_to_host(nodes, scenario):
-    """
-    Copia logs dos containers para o host.
-    """
-    info(f"*** Dumping logs for scenario: {scenario}\n")
-    
-    for node in nodes:
-        log_dir = f"/tmp/drone-logs-{scenario}-{node.name}"
-        try:
-            # Cria diretório no host
-            os.makedirs(log_dir, exist_ok=True)
-            
-            # Copia logs do container
-            node.cmd(f"cp /tmp/drone-logs/* {log_dir}/ 2>/dev/null || true")
-            
-            info(f"*** Logs from {node.name} copied to {log_dir}\n")
-        except Exception as e:
-            info(f"*** Error copying logs from {node.name}: {e}\n")
-
-
-def open_cli_or_stop(net, cli=True):
-    """
-    Abre CLI ou apenas para a rede.
-    """
-    if cli:
-        info("*** Opening CLI\n")
-        CLI(net)
-
-    info("*** Stopping network\n")
-    net.stop()
+    for src in nodes:
+        for dst in nodes:
+            if src != dst:
+                dst_ip = dst.IP()
+                info(f"*** {src.name} -> {dst.name} ({dst_ip})\n")
+                result = src.cmd(f"ping -c 1 -W 1 {dst_ip}")
+                info(result)
 
 
 def finish(net, cli=True):
-    """
-    Encerra a rede. Alias para open_cli_or_stop para compatibilidade.
-    """
-    open_cli_or_stop(net, cli)
+    try:
+        if cli:
+            info("*** Opening CLI\n")
+            CLI(net)
+    finally:
+        info("*** Stopping network\n")
+        net.stop()

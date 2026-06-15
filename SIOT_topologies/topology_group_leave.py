@@ -4,25 +4,8 @@
 topology_group_leave.py
 
 Cenário:
-- Grupo inicial autenticado.
-- Um drone sai voluntariamente do grupo.
-
-Objetivo:
-- Avaliar o custo de saída voluntária.
-- Medir rekeying, continuidade da comunicação e impacto nos membros restantes.
-
-Evento principal:
-- drone4 envia evento de leave.
-- Grupo atualiza estado/chave.
-- drone4 deixa de participar da comunicação segura.
-
-Métricas:
-- Tempo de leave.
-- Tempo de rekeying.
-- Perda durante atualização.
-- Continuidade da comunicação.
-- Mensagens de controle.
-- Capacidade do ex-membro de acessar mensagens futuras.
+- Grupo em rede ad hoc.
+- drone4 sai voluntariamente do grupo.
 """
 
 from mininet.log import setLogLevel, info
@@ -30,42 +13,48 @@ from mininet.log import setLogLevel, info
 from common import (
     create_network,
     add_controller,
-    add_group_ap,
     add_auth_server,
     add_drone,
-    configure_and_start,
+    configure_adhoc_network,
+    start_network,
     prepare_all,
+    start_metrics_all,
     start_auth_server,
     start_group_member,
-    start_leave_request,
-    start_group_traffic_receiver,
-    start_group_traffic_sender,
-    start_metrics_all,
-    wait_event,
-    dump_logs_to_host,
-    open_cli_or_stop
+    request_leave,
+    start_receiver,
+    start_sender,
+    test_connectivity,
+    wait,
+    finish
 )
 
 
-SCENARIO = "group_leave"
+SCENARIO = "group_leave_adhoc"
 
 
 def run(cli=True):
     net = create_network()
 
-    info("*** Creating group leave scenario\n")
+    info("*** Creating group leave over ad hoc network\n")
 
     add_controller(net)
-    add_group_ap(net)
 
-    auth = add_auth_server(net, name="auth", ip="10.0.0.100/24")
+    auth = add_auth_server(
+        net,
+        name="auth1",
+        ip="10.0.0.100/24",
+        position="50,50,0",
+        range_=130
+    )
 
     drone1 = add_drone(
         net,
         name="drone1",
         ip="10.0.0.1/24",
         position="30,50,0",
-        role="initial_member"
+        role="initial_member",
+        range_=100
     )
 
     drone2 = add_drone(
@@ -73,7 +62,8 @@ def run(cli=True):
         name="drone2",
         ip="10.0.0.2/24",
         position="40,60,0",
-        role="initial_member"
+        role="initial_member",
+        range_=100
     )
 
     drone3 = add_drone(
@@ -81,7 +71,8 @@ def run(cli=True):
         name="drone3",
         ip="10.0.0.3/24",
         position="60,60,0",
-        role="initial_member"
+        role="initial_member",
+        range_=100
     )
 
     drone4 = add_drone(
@@ -89,48 +80,58 @@ def run(cli=True):
         name="drone4",
         ip="10.0.0.4/24",
         position="70,50,0",
-        role="leaving_member"
+        role="leaving_member",
+        range_=100
     )
 
-    nodes = [auth, drone1, drone2, drone3, drone4]
+    stations = [auth, drone1, drone2, drone3, drone4]
+    drones = [drone1, drone2, drone3, drone4]
+    remaining_drones = [drone1, drone2, drone3]
 
-    configure_and_start(net)
-    prepare_all(nodes, SCENARIO)
+    configure_adhoc_network(
+        net,
+        stations,
+        ssid="drone-adhoc-net",
+        channel=5,
+        mode="g"
+    )
 
-    start_metrics_all(nodes, SCENARIO)
+    start_network(net)
 
-    # t=2: iniciar autoridade
-    wait_event(2, "starting central authority")
-    start_auth_server(auth, scenario_name=SCENARIO)
+    prepare_all(stations, SCENARIO)
+    start_metrics_all(stations, SCENARIO)
 
-    # t=5: formar grupo completo
-    wait_event(3, "forming group with four drones")
-    for drone in [drone1, drone2, drone3, drone4]:
+    wait(3, "testing ad hoc connectivity")
+    test_connectivity(stations)
+
+    wait(2, "starting central authority")
+    start_auth_server(auth, SCENARIO)
+
+    wait(3, "forming group with four drones")
+    for drone in drones:
         start_group_member(drone)
 
-    # t=15: iniciar tráfego normal
-    wait_event(10, "starting normal group traffic")
-    for drone in [drone1, drone2, drone3, drone4]:
-        start_group_traffic_receiver(drone)
+    wait(10, "starting group traffic")
+    for drone in drones:
+        start_receiver(drone)
 
-    start_group_traffic_sender(drone1, dst="10.0.0.255", port=5001, rate="10pps")
+    start_sender(drone1, dst="10.0.0.255", port=5001, rate="10pps")
 
-    # t=30: drone4 sai voluntariamente
-    wait_event(15, "drone4 sending leave request")
-    start_leave_request(drone4)
+    wait(15, "drone4 voluntarily leaves")
+    request_leave(drone4)
 
-    # Opcional: mover drone4 para fora do alcance após saída
-    wait_event(5, "moving drone4 away after voluntary leave")
-    drone4.setPosition("180,180,0")
+    wait(5, "moving drone4 away after leave")
+    drone4.setPosition("220,220,0")
 
-    # t=45: tráfego continua entre membros restantes
-    wait_event(10, "continuing traffic among remaining members")
-    start_group_traffic_sender(drone2, dst="10.0.0.255", port=5001, rate="10pps")
+    wait(10, "remaining drones continue communication")
+    start_sender(drone2, dst="10.0.0.255", port=5001, rate="10pps")
 
-    wait_event(20, "final measurement window")
+    wait(20, "testing remaining connectivity")
+    test_connectivity([auth] + remaining_drones)
 
-    dump_logs_to_host(nodes, SCENARIO)
-    open_cli_or_stop(net, cli=cli)
+    wait(20, "final measurement window")
+
+    finish(net, cli=cli)
 
 
 if __name__ == "__main__":
