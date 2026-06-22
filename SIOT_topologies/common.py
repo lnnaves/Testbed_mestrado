@@ -12,6 +12,7 @@ Modelo usado:
 - A autoridade central é lógica, não infraestrutura wireless.
 """
 
+import argparse
 from time import sleep
 
 from containernet.net import Containernet
@@ -532,3 +533,156 @@ def finish(net, cli=True):
     finally:
         info("*** Stopping network\n")
         net.stop()
+
+
+# ============================================================
+# Configuração experimental
+# ============================================================
+
+def parse_experiment_args(description="Drone group experiment"):
+    """
+    Analisa argumentos de linha de comando para configuração experimental.
+
+    Parâmetros:
+    - --runs: número de repetições do ensaio (padrão: 1).
+    - --no-cli: desabilita abertura da CLI ao final.
+    - --traffic-rate: taxa de tráfego (padrão: 10pps).
+    - --group-id: identificador do grupo (padrão: mission-alpha).
+    - --ssid: SSID da rede ad hoc (padrão: drone-adhoc-net).
+    - --channel: canal Wi-Fi (padrão: 5).
+    - --mode: modo Wi-Fi (padrão: g).
+    - --movement-steps: número de passos para movimentos simulados (padrão: 1).
+    - --movement-interval: intervalo entre passos de movimento em segundos (padrão: 1.0).
+    """
+
+    parser = argparse.ArgumentParser(description=description)
+
+    parser.add_argument(
+        "--runs", type=int, default=1,
+        help="Number of experiment repetitions (default: 1)"
+    )
+    parser.add_argument(
+        "--no-cli", action="store_true",
+        help="Disable CLI at the end of the last run"
+    )
+    parser.add_argument(
+        "--traffic-rate", default="10pps",
+        help="Traffic generation rate (default: 10pps)"
+    )
+    parser.add_argument(
+        "--group-id", default="mission-alpha",
+        help="Group identifier (default: mission-alpha)"
+    )
+    parser.add_argument(
+        "--ssid", default="drone-adhoc-net",
+        help="Ad hoc network SSID (default: drone-adhoc-net)"
+    )
+    parser.add_argument(
+        "--channel", type=int, default=5,
+        help="Wi-Fi channel (default: 5)"
+    )
+    parser.add_argument(
+        "--mode", default="g",
+        help="Wi-Fi mode (default: g)"
+    )
+    parser.add_argument(
+        "--movement-steps", type=int, default=1,
+        help="Number of interpolation steps for simulated movement (default: 1)"
+    )
+    parser.add_argument(
+        "--movement-interval", type=float, default=1.0,
+        help="Interval in seconds between movement steps (default: 1.0)"
+    )
+
+    return parser.parse_args()
+
+
+def run_experiment_runs(run_once, runs=1, cli=True):
+    """
+    Executa run_once(run_id, open_cli) para cada repetição do ensaio.
+
+    Parâmetros:
+    - run_once: callable(run_id, open_cli) executado a cada repetição.
+    - runs: número total de repetições (deve ser >= 1).
+    - cli: se True, abre a CLI somente no último run.
+
+    O segundo argumento passado a run_once (open_cli) é True apenas no
+    último run quando cli=True, permitindo que o callback decida se deve
+    abrir a interface interativa.
+    """
+
+    if runs < 1:
+        raise ValueError(f"runs must be >= 1, got {runs}")
+
+    for run_id in range(runs):
+        is_last_run = (run_id == runs - 1)
+        open_cli = cli and is_last_run
+        info(f"\n*** Starting run {run_id + 1} of {runs}\n")
+        run_once(run_id, open_cli)
+
+    info(f"\n*** All {runs} run(s) completed\n")
+
+
+def move_node_in_steps(node, target_position, steps=1, interval=1.0):
+    """
+    Move um nó até a posição alvo, opcionalmente em múltiplos passos.
+
+    Parâmetros:
+    - node: nó Mininet-WiFi/DockerSta a ser movido.
+    - target_position: posição alvo no formato "x,y,z".
+    - steps: número de passos de interpolação (padrão: 1, movimento direto).
+    - interval: intervalo em segundos entre passos (padrão: 1.0).
+
+    Se steps <= 1, usa setPosition diretamente (comportamento atual).
+    Se steps > 1, interpola linearmente da posição atual até o alvo.
+    Se a posição atual não puder ser obtida, cai para setPosition direto.
+    """
+
+    if steps <= 1:
+        info(f"*** Moving {node.name} to {target_position}\n")
+        node.setPosition(target_position)
+        return
+
+    try:
+        raw_pos = node.params.get("position", "0,0,0")
+        if callable(raw_pos):
+            info(
+                f"*** Warning: position attribute of {node.name} is callable, "
+                f"falling back to direct movement\n"
+            )
+            node.setPosition(target_position)
+            return
+        cx, cy, cz = [float(v) for v in str(raw_pos).split(",")]
+    except Exception:
+        info(
+            f"*** Could not read current position of {node.name}, "
+            f"moving directly to {target_position}\n"
+        )
+        node.setPosition(target_position)
+        return
+
+    try:
+        tx, ty, tz = [float(v) for v in target_position.split(",")]
+    except Exception:
+        info(
+            f"*** Invalid target position '{target_position}' for {node.name}, "
+            f"moving directly\n"
+        )
+        node.setPosition(target_position)
+        return
+
+    info(
+        f"*** Moving {node.name} from {cx:.1f},{cy:.1f},{cz:.1f} "
+        f"to {tx:.1f},{ty:.1f},{tz:.1f} in {steps} step(s)\n"
+    )
+
+    for step in range(1, steps + 1):
+        fraction = step / steps
+        x = cx + (tx - cx) * fraction
+        y = cy + (ty - cy) * fraction
+        z = cz + (tz - cz) * fraction
+        pos = f"{x:.1f},{y:.1f},{z:.1f}"
+        info(f"*** {node.name} movement step {step}/{steps}: {pos}\n")
+        node.setPosition(pos)
+        if step < steps:
+            sleep(interval)

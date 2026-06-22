@@ -21,14 +21,26 @@ from common import (
     start_sender,
     test_connectivity,
     wait,
-    finish
+    finish,
+    parse_experiment_args,
+    run_experiment_runs,
+    move_node_in_steps
 )
 
 
 SCENARIO = "group_leave_adhoc"
 
 
-def run(cli=True):
+def run(
+    cli=True,
+    traffic_rate="10pps",
+    group_id="mission-alpha",
+    ssid="drone-adhoc-net",
+    channel=5,
+    mode="g",
+    movement_steps=1,
+    movement_interval=1.0
+):
     net = create_network()
 
     info("*** Creating group leave over ad hoc network\n")
@@ -48,26 +60,29 @@ def run(cli=True):
     stations = topology["stations"]
     remaining_drones = [drone1, drone2, drone3]
 
-    initialize_adhoc_experiment(net, stations, SCENARIO, auth=auth)
+    initialize_adhoc_experiment(
+        net, stations, SCENARIO, auth=auth,
+        ssid=ssid, channel=channel, mode=mode
+    )
 
     wait(3, "forming group with four drones")
     for drone in drones:
-        start_group_member(drone)
+        start_group_member(drone, group_id=group_id)
 
     wait(10, "starting group traffic")
     for drone in drones:
         start_receiver(drone)
 
-    start_sender(drone1, dst="10.0.0.255", port=5001, rate="10pps")
+    start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
     wait(15, "drone4 voluntarily leaves")
-    request_leave(drone4)
+    request_leave(drone4, group_id=group_id)
 
     wait(5, "moving drone4 away after leave")
-    drone4.setPosition("220,220,0")
+    move_node_in_steps(drone4, "220,220,0", steps=movement_steps, interval=movement_interval)
 
     wait(10, "remaining drones continue communication")
-    start_sender(drone2, dst="10.0.0.255", port=5001, rate="10pps")
+    start_sender(drone2, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
     wait(20, "testing remaining connectivity")
     test_connectivity([auth] + remaining_drones)
@@ -79,4 +94,18 @@ def run(cli=True):
 
 if __name__ == "__main__":
     setLogLevel("info")
-    run(cli=True)
+    args = parse_experiment_args("Group leave experiment")
+
+    def run_once(run_id, open_cli):
+        run(
+            cli=open_cli,
+            traffic_rate=args.traffic_rate,
+            group_id=args.group_id,
+            ssid=args.ssid,
+            channel=args.channel,
+            mode=args.mode,
+            movement_steps=args.movement_steps,
+            movement_interval=args.movement_interval,
+        )
+
+    run_experiment_runs(run_once, runs=args.runs, cli=not args.no_cli)
