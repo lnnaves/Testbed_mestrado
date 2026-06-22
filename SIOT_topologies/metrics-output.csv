@@ -1,0 +1,53 @@
+*** Creating centralized group authentication scenario
+*** Adding controller
+*** Adding access point
+*** Adding central authority container station: auth
+*** Adding drone container station: drone1, role=initial_member
+*** Adding drone container station: drone2, role=initial_member
+*** Adding drone container station: drone3, role=initial_member
+*** Adding drone container station: drone4, role=initial_member
+*** Configuring WiFi nodes
+*** auth-wlan0: requested 130.00m -> effective 130.00m (delta +0.00m) using tx power 3 dBm
+*** drone1-wlan0: minimum tx power (1 dBm) yields 90.00m for requested 90.00m (delta +0.00m)
+*** drone2-wlan0: minimum tx power (1 dBm) yields 90.00m for requested 90.00m (delta +0.00m)
+*** drone3-wlan0: minimum tx power (1 dBm) yields 90.00m for requested 90.00m (delta +0.00m)
+*** drone4-wlan0: minimum tx power (1 dBm) yields 90.00m for requested 90.00m (delta +0.00m)
+*** ap1-wlan1: requested 130.00m -> effective 130.00m (delta +0.00m) using tx power 3 dBm
+*** Starting network
+*** Network started
+*** Starting metrics on auth
+*** Starting metrics on drone1
+*** Starting metrics on drone2
+*** Starting metrics on drone3
+*** Starting metrics on drone4
+
+*** Waiting 2s: starting central authority
+*** Starting auth server in container auth
+
+*** Waiting 3s: starting group authentication for initial members
+*** Starting group protocol in drone1
+*** Starting group protocol in drone2
+*** Starting group protocol in drone3
+*** Starting group protocol in drone4
+
+*** Waiting 10s: starting group traffic after authentication
+*** Starting receiver on drone1
+*** Starting receiver on drone2
+*** Starting receiver on drone3
+*** Starting receiver on drone4
+*** Starting sender on drone1
+
+*** Waiting 30s: collecting steady-state metrics
+*** Dumping logs for scenario: centralized_group_auth
+*** Logs from auth copied to /tmp/drone-logs-centralized_group_auth-auth
+*** Logs from drone1 copied to /tmp/drone-logs-centralized_group_auth-drone1
+*** Logs from drone2 copied to /tmp/drone-logs-centralized_group_auth-drone2
+*** Logs from drone3 copied to /tmp/drone-logs-centralized_group_auth-drone3
+*** Logs from drone4 copied to /tmp/drone-logs-centralized_group_auth-drone4
+*** Opening CLI
+*** Starting CLI:
+containernet> 
+Interrupt
+containernet> 
+Interrupt
+containernet> 

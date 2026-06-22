@@ -1,12 +1,45 @@
 #!/usr/bin/env python3
 
+"""
+group_auth.py
+
+Agente do protocolo de autenticação em grupo.
+
+Modos (--role):
+  auth-server  : sobe o servidor TCP 9000 e mantém GroupState.
+  member       : registra no auth e entra em loop de heartbeat.
+  joiner       : faz join (ou --event join em qualquer role).
+  member --event leave : faz leave.
+  auth-server --event revoke --target X : revoga um drone (executado dentro do auth).
+
+Saídas:
+  - Log em texto livre em stdout (capturado pelo redirect na topologia).
+  - CSV estruturado em /tmp/drone-logs/protocol_latency.csv com uma linha
+    por evento medido. Esse é o arquivo que você usa para análise.
+"""
+
 import argparse
+import csv
 import json
+import os
 import socket
 import socketserver
 import threading
 import time
 from datetime import datetime
+
+
+# ============================================================
+# Logging / utilidades
+# ============================================================
+
+CSV_PATH = os.environ.get(
+    "PROTO_CSV",
+    "/tmp/drone-logs/protocol_latency.csv",
+)
+SCENARIO = os.environ.get("SCENARIO", "default")
+
+_CSV_LOCK = threading.Lock()
 
 
 def now():
@@ -16,6 +49,58 @@ def now():
 def log(msg):
     print(f"[{now()}] [group-auth] {msg}", flush=True)
 
+
+def emit_event(
+    event_type,
+    role,
+    drone_id,
+    group_id,
+    epoch,
+    elapsed_ms,
+    status,
+    extra="",
+):
+    """
+    Escreve uma linha CSV por evento medido.
+    Cabeçalho é escrito apenas na primeira vez que o arquivo é criado.
+    """
+    new_file = not os.path.exists(CSV_PATH)
+
+    os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+
+    with _CSV_LOCK:
+        with open(CSV_PATH, "a", newline="") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow([
+                    "timestamp_utc",
+                    "scenario",
+                    "role",
+                    "event",
+                    "drone_id",
+                    "group_id",
+                    "epoch",
+                    "elapsed_ms",
+                    "status",
+                    "extra",
+                ])
+            w.writerow([
+                now(),
+                SCENARIO,
+                role,
+                event_type,
+                drone_id if drone_id is not None else "",
+                group_id if group_id is not None else "",
+                epoch if epoch is not None else "",
+                f"{elapsed_ms:.3f}" if elapsed_ms is not None else "",
+                status if status is not None else "",
+                extra,
+            ])
+
+
+# ============================================================
+# Estado do grupo (no servidor)
+# ============================================================
 
 class GroupState:
     def __init__(self, group_id):
@@ -111,6 +196,10 @@ class GroupState:
             }
 
 
+# ============================================================
+# Handler TCP do servidor
+# ============================================================
+
 class AuthTCPHandler(socketserver.StreamRequestHandler):
     group_state = None
 
@@ -155,6 +244,10 @@ class AuthTCPHandler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
 
 
+# ============================================================
+# Cliente
+# ============================================================
+
 def parse_host_port(auth_server):
     if ":" not in auth_server:
         return auth_server, 9000
@@ -186,6 +279,10 @@ def send_request(host, port, payload, timeout=5):
     return response, elapsed_ms
 
 
+# ============================================================
+# Modos de execução
+# ============================================================
+
 def run_auth_server(args):
     host = args.listen or "0.0.0.0"
     port = int(args.port or 9000)
@@ -216,15 +313,44 @@ def run_member(args):
         "timestamp": now(),
     }
 
-    response, elapsed_ms = send_request(host, port, payload)
+    try:
+        response, elapsed_ms = send_request(host, port, payload)
+        status = response.get("status", "unknown")
+        epoch = response.get("epoch")
+        log(
+            f"member={args.drone_id} register_response={response} "
+            f"auth_time_ms={elapsed_ms:.3f}"
+        )
+        emit_event(
+            "register",
+            role="member",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=epoch,
+            elapsed_ms=elapsed_ms,
+            status=status,
+        )
+    except Exception as exc:
+        log(f"member={args.drone_id} register_failed error={exc}")
+        emit_event(
+            "register",
+            role="member",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=None,
+            elapsed_ms=None,
+            status="error",
+            extra=str(exc),
+        )
 
-    log(
-        f"member={args.drone_id} register_response={response} "
-        f"auth_time_ms={elapsed_ms:.3f}"
-    )
-
+    start_t = time.time()
     while True:
-        time.sleep(5)
+        if args.duration and (time.time() - start_t) >= args.duration:
+            log(f"member={args.drone_id} duration reached, exiting")
+            return
+
+        time.sleep(args.heartbeat_interval)
+
         status_payload = {
             "event": "status",
             "drone_id": args.drone_id,
@@ -241,8 +367,27 @@ def run_member(args):
                 f"revoked={response.get('revoked')} "
                 f"rtt_ms={elapsed_ms:.3f}"
             )
+            emit_event(
+                "heartbeat",
+                role="member",
+                drone_id=args.drone_id,
+                group_id=args.group_id,
+                epoch=response.get("epoch"),
+                elapsed_ms=elapsed_ms,
+                status=response.get("status", "unknown"),
+            )
         except Exception as exc:
             log(f"member={args.drone_id} heartbeat_failed error={exc}")
+            emit_event(
+                "heartbeat",
+                role="member",
+                drone_id=args.drone_id,
+                group_id=args.group_id,
+                epoch=None,
+                elapsed_ms=None,
+                status="error",
+                extra=str(exc),
+            )
 
 
 def run_join(args):
@@ -255,14 +400,38 @@ def run_join(args):
         "timestamp": now(),
     }
 
-    response, elapsed_ms = send_request(host, port, payload)
+    try:
+        response, elapsed_ms = send_request(host, port, payload)
+        log(
+            f"joiner={args.drone_id} join_response={response} "
+            f"join_time_ms={elapsed_ms:.3f}"
+        )
+        emit_event(
+            "join",
+            role="joiner",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=response.get("epoch"),
+            elapsed_ms=elapsed_ms,
+            status=response.get("status", "unknown"),
+        )
+    except Exception as exc:
+        log(f"joiner={args.drone_id} join_failed error={exc}")
+        emit_event(
+            "join",
+            role="joiner",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=None,
+            elapsed_ms=None,
+            status="error",
+            extra=str(exc),
+        )
 
-    log(
-        f"joiner={args.drone_id} join_response={response} "
-        f"join_time_ms={elapsed_ms:.3f}"
-    )
-
+    start_t = time.time()
     while True:
+        if args.duration and (time.time() - start_t) >= args.duration:
+            return
         time.sleep(5)
 
 
@@ -276,17 +445,36 @@ def run_leave(args):
         "timestamp": now(),
     }
 
-    response, elapsed_ms = send_request(host, port, payload)
-
-    log(
-        f"member={args.drone_id} leave_response={response} "
-        f"leave_time_ms={elapsed_ms:.3f}"
-    )
+    try:
+        response, elapsed_ms = send_request(host, port, payload)
+        log(
+            f"member={args.drone_id} leave_response={response} "
+            f"leave_time_ms={elapsed_ms:.3f}"
+        )
+        emit_event(
+            "leave",
+            role="member",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=response.get("epoch"),
+            elapsed_ms=elapsed_ms,
+            status=response.get("status", "unknown"),
+        )
+    except Exception as exc:
+        log(f"member={args.drone_id} leave_failed error={exc}")
+        emit_event(
+            "leave",
+            role="member",
+            drone_id=args.drone_id,
+            group_id=args.group_id,
+            epoch=None,
+            elapsed_ms=None,
+            status="error",
+            extra=str(exc),
+        )
 
 
 def run_revoke(args):
-    # Esse modo é executado normalmente dentro do container da autoridade.
-    # Ele conecta no auth-server local já em execução.
     auth_server = args.auth_server or "127.0.0.1:9000"
     host, port = parse_host_port(auth_server)
 
@@ -297,19 +485,44 @@ def run_revoke(args):
         "timestamp": now(),
     }
 
-    response, elapsed_ms = send_request(host, port, payload)
+    try:
+        response, elapsed_ms = send_request(host, port, payload)
+        log(
+            f"target={args.target} revoke_response={response} "
+            f"revocation_time_ms={elapsed_ms:.3f}"
+        )
+        emit_event(
+            "revoke",
+            role="auth-server",
+            drone_id=args.target,
+            group_id=args.group_id,
+            epoch=response.get("epoch"),
+            elapsed_ms=elapsed_ms,
+            status=response.get("status", "unknown"),
+        )
+    except Exception as exc:
+        log(f"target={args.target} revoke_failed error={exc}")
+        emit_event(
+            "revoke",
+            role="auth-server",
+            drone_id=args.target,
+            group_id=args.group_id,
+            epoch=None,
+            elapsed_ms=None,
+            status="error",
+            extra=str(exc),
+        )
 
-    log(
-        f"target={args.target} revoke_response={response} "
-        f"revocation_time_ms={elapsed_ms:.3f}"
-    )
 
+# ============================================================
+# Entry point
+# ============================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Simulated group authentication agent")
 
     parser.add_argument("--role", required=True)
-    parser.add_argument("--scenario", default="default")
+    parser.add_argument("--scenario", default=os.environ.get("SCENARIO", "default"))
     parser.add_argument("--listen", default="0.0.0.0")
     parser.add_argument("--port", default="9000")
     parser.add_argument("--drone-id")
@@ -317,10 +530,26 @@ def main():
     parser.add_argument("--auth-server", default="10.0.0.100:9000")
     parser.add_argument("--event")
     parser.add_argument("--target")
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=0,
+        help="0 = run forever; >0 = seconds before client loops exit",
+    )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=5.0,
+        help="seconds between status heartbeats (member mode)",
+    )
 
     args = parser.parse_args()
 
-    log(f"started with args={args}")
+    # Garante que SCENARIO usado nos CSVs respeite --scenario se passado.
+    global SCENARIO
+    SCENARIO = args.scenario or SCENARIO
+
+    log(f"started with args={args} csv={CSV_PATH} scenario={SCENARIO}")
 
     if args.role == "auth-server" and args.event == "revoke":
         run_revoke(args)

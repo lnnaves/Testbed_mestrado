@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     tcpdump \
     iperf3 \
+    iw \
+    wireless-tools \
+    tshark \
     curl \
     python3 \
     python3-pip \
@@ -17,8 +20,14 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /opt/drone-sec
 
+# Contexto de build deve ser SIOT_topologies/
+# (o Makefile já garante isso).
 COPY scripts/ /opt/drone-sec/bin/
 
-RUN chmod +x /opt/drone-sec/bin/*
+RUN chmod +x /opt/drone-sec/bin/*.py \
+ && ln -s /opt/drone-sec/bin/group_auth.py      /opt/drone-sec/bin/group-auth \
+ && ln -s /opt/drone-sec/bin/traffic_agent.py   /opt/drone-sec/bin/traffic-agent \
+ && ln -s /opt/drone-sec/bin/metrics_agent.py   /opt/drone-sec/bin/metrics-agent \
+ && ln -s /opt/drone-sec/bin/malicious_agent.py /opt/drone-sec/bin/malicious-agent
 
 CMD ["/bin/bash"]

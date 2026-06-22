@@ -53,7 +53,7 @@ def create_network():
     net = Containernet(
         controller=Controller,
         autoSetMacs=True,
-        autoStaticArp=True
+        autoStaticArp=False
     )
 
     # Modelo simples de propagação.
