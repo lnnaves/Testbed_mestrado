@@ -27,7 +27,10 @@ from common import (
     wait,
     finish,
     parse_experiment_args,
-    run_experiment_runs
+    run_experiment_runs,
+    build_metrics_file,
+    record_event_metric,
+    measure_rtt_matrix,
 )
 
 
@@ -42,7 +45,11 @@ def run(
     channel=5,
     mode="g",
     movement_steps=1,    # accepted for interface uniformity; not used in this scenario
-    movement_interval=1.0  # accepted for interface uniformity; not used in this scenario
+    movement_interval=1.0,  # accepted for interface uniformity; not used in this scenario
+    run_id=0,
+    metrics_dir="./results",
+    ping_count=5,
+    ping_timeout=1,
 ):
     net = create_network()
 
@@ -63,36 +70,103 @@ def run(
     stations = topology["stations"]
     legitimate_after_revocation = [drone1, drone2, drone4]
 
+    metrics_file = build_metrics_file(SCENARIO, run_id=run_id, output_dir=metrics_dir)
+    info(f"*** Metrics file: {metrics_file}\n")
+
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="scenario_start", phase="bootstrap",
+        node="orchestrator", status="started"
+    )
+
     initialize_adhoc_experiment(
         net, stations, SCENARIO, auth=auth,
         ssid=ssid, channel=channel, mode=mode
     )
 
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="auth_server_start", phase="bootstrap",
+        node=auth.name, status="started"
+    )
+
     wait(3, "forming group before compromise detection")
     for drone in drones:
+        record_event_metric(
+            metrics_file, SCENARIO, run_id,
+            event="member_auth_requested", phase="auth",
+            node=drone.name, target=auth.name, status="started"
+        )
         start_group_member(drone, group_id=group_id)
+
+    measure_rtt_matrix(
+        stations,
+        count=ping_count, timeout=ping_timeout,
+        metrics_file=metrics_file, scenario=SCENARIO, run_id=run_id,
+        phase="pre_revocation"
+    )
 
     wait(10, "starting normal group traffic")
     for drone in drones:
         start_receiver(drone)
 
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="traffic_start", phase="pre_revocation_traffic",
+        node=drone1.name, status="started"
+    )
     start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
     wait(15, "drone3 starts malicious behavior")
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="malicious_traffic_start", phase="compromise",
+        node=drone3.name, status="started"
+    )
     start_malicious_traffic(drone3, dst="10.0.0.255", port=5001)
 
     wait(5, "central authority revokes drone3")
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="revocation_requested", phase="revocation",
+        node=auth.name, target=drone3.name, status="started"
+    )
     revoke_member(auth, target="drone3", group_id=group_id)
 
+    measure_rtt_matrix(
+        stations,
+        count=ping_count, timeout=ping_timeout,
+        metrics_file=metrics_file, scenario=SCENARIO, run_id=run_id,
+        phase="post_revocation"
+    )
+
     wait(10, "legitimate drones continue after revocation")
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="traffic_start", phase="post_revocation_traffic",
+        node=drone2.name, status="started"
+    )
     start_sender(drone2, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
     wait(15, "testing connectivity after revocation")
     test_connectivity([auth] + legitimate_after_revocation)
 
+    measure_rtt_matrix(
+        [auth] + legitimate_after_revocation,
+        count=ping_count, timeout=ping_timeout,
+        metrics_file=metrics_file, scenario=SCENARIO, run_id=run_id,
+        phase="legitimate_only"
+    )
+
     # drone3 continua fisicamente perto.
     # Isso é intencional: queremos testar exclusão lógica, não desconexão física.
     wait(25, "revoked drone remains nearby for validation")
+
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="scenario_end", phase="teardown",
+        node="orchestrator", status="completed"
+    )
 
     finish(net, cli=cli)
 
@@ -111,6 +185,10 @@ if __name__ == "__main__":
             mode=args.mode,
             movement_steps=args.movement_steps,
             movement_interval=args.movement_interval,
+            run_id=run_id,
+            metrics_dir=args.metrics_dir,
+            ping_count=args.ping_count,
+            ping_timeout=args.ping_timeout,
         )
 
     run_experiment_runs(run_once, runs=args.runs, cli=not args.no_cli)
