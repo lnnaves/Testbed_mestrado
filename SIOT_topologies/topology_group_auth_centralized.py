@@ -14,17 +14,11 @@ from mininet.log import setLogLevel, info
 from common import (
     create_network,
     add_controller,
-    add_auth_server,
-    add_drone,
-    configure_adhoc_network,
-    start_network,
-    prepare_all,
-    start_metrics_all,
-    start_auth_server,
+    create_base_group_topology,
+    initialize_adhoc_experiment,
     start_group_member,
     start_receiver,
     start_sender,
-    test_connectivity,
     wait,
     finish
 )
@@ -40,71 +34,13 @@ def run(cli=True):
 
     add_controller(net)
 
-    auth = add_auth_server(
-        net,
-        name="auth1",
-        ip="10.0.0.100/24",
-        position="50,50,0",
-        range_=130
-    )
+    topology = create_base_group_topology(net)
+    auth = topology["auth"]
+    drone1 = topology["drone1"]
+    drones = topology["drones"]
+    stations = topology["stations"]
 
-    drone1 = add_drone(
-        net,
-        name="drone1",
-        ip="10.0.0.1/24",
-        position="30,50,0",
-        role="initial_member",
-        range_=100
-    )
-
-    drone2 = add_drone(
-        net,
-        name="drone2",
-        ip="10.0.0.2/24",
-        position="40,60,0",
-        role="initial_member",
-        range_=100
-    )
-
-    drone3 = add_drone(
-        net,
-        name="drone3",
-        ip="10.0.0.3/24",
-        position="60,60,0",
-        role="initial_member",
-        range_=100
-    )
-
-    drone4 = add_drone(
-        net,
-        name="drone4",
-        ip="10.0.0.4/24",
-        position="70,50,0",
-        role="initial_member",
-        range_=100
-    )
-
-    stations = [auth, drone1, drone2, drone3, drone4]
-    drones = [drone1, drone2, drone3, drone4]
-
-    configure_adhoc_network(
-        net,
-        stations,
-        ssid="drone-adhoc-net",
-        channel=5,
-        mode="g"
-    )
-
-    start_network(net)
-
-    prepare_all(stations, SCENARIO)
-    start_metrics_all(stations, SCENARIO)
-
-    wait(3, "testing ad hoc connectivity")
-    test_connectivity(stations)
-
-    wait(2, "starting central authority")
-    start_auth_server(auth, SCENARIO)
+    initialize_adhoc_experiment(net, stations, SCENARIO, auth=auth)
 
     wait(3, "drones authenticate with central authority")
     for drone in drones:

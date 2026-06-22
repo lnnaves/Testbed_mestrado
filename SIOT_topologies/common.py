@@ -152,13 +152,98 @@ def add_auth_server(
     return auth
 
 
+def create_base_group_topology(
+    net,
+    drone_positions=None,
+    drone_roles=None,
+    auth_position="50,50,0",
+    auth_range=130,
+    drone_range=100
+):
+    """
+    Cria a topologia base reutilizável com auth central e quatro drones.
+    """
+
+    default_positions = {
+        "drone1": "30,50,0",
+        "drone2": "40,60,0",
+        "drone3": "60,60,0",
+        "drone4": "70,50,0"
+    }
+    default_roles = {
+        "drone1": "initial_member",
+        "drone2": "initial_member",
+        "drone3": "initial_member",
+        "drone4": "initial_member"
+    }
+
+    if drone_positions:
+        default_positions.update(drone_positions)
+
+    if drone_roles:
+        default_roles.update(drone_roles)
+
+    auth = add_auth_server(
+        net,
+        name="auth1",
+        ip="10.0.0.100/24",
+        position=auth_position,
+        range_=auth_range
+    )
+
+    drone1 = add_drone(
+        net,
+        name="drone1",
+        ip="10.0.0.1/24",
+        position=default_positions["drone1"],
+        role=default_roles["drone1"],
+        range_=drone_range
+    )
+    drone2 = add_drone(
+        net,
+        name="drone2",
+        ip="10.0.0.2/24",
+        position=default_positions["drone2"],
+        role=default_roles["drone2"],
+        range_=drone_range
+    )
+    drone3 = add_drone(
+        net,
+        name="drone3",
+        ip="10.0.0.3/24",
+        position=default_positions["drone3"],
+        role=default_roles["drone3"],
+        range_=drone_range
+    )
+    drone4 = add_drone(
+        net,
+        name="drone4",
+        ip="10.0.0.4/24",
+        position=default_positions["drone4"],
+        role=default_roles["drone4"],
+        range_=drone_range
+    )
+
+    drones = [drone1, drone2, drone3, drone4]
+    stations = [auth] + drones
+
+    return {
+        "auth": auth,
+        "drones": drones,
+        "stations": stations,
+        "drone1": drone1,
+        "drone2": drone2,
+        "drone3": drone3,
+        "drone4": drone4
+    }
+
+
 def configure_adhoc_network(
     net,
     stations,
     ssid="drone-adhoc-net",
     channel=5,
-    mode="g",
-    proto="batman_adv"
+    mode="g"
 ):
     """
     Configura todos os nós em uma mesma rede ad hoc.
@@ -200,6 +285,45 @@ def start_network(net):
         controller.start()
 
     info("*** Network started\n")
+
+
+def initialize_adhoc_experiment(
+    net,
+    stations,
+    scenario,
+    connectivity_nodes=None,
+    auth=None,
+    ssid="drone-adhoc-net",
+    channel=5,
+    mode="g",
+    connectivity_wait=3,
+    auth_start_wait=2
+):
+    """
+    Executa o bootstrap comum do experimento em rede ad hoc.
+    """
+
+    configure_adhoc_network(
+        net,
+        stations,
+        ssid=ssid,
+        channel=channel,
+        mode=mode
+    )
+
+    start_network(net)
+    prepare_all(stations, scenario)
+    start_metrics_all(stations, scenario)
+
+    if connectivity_nodes is None:
+        connectivity_nodes = stations
+
+    wait(connectivity_wait, "testing ad hoc connectivity")
+    test_connectivity(connectivity_nodes)
+
+    if auth is not None:
+        wait(auth_start_wait, "starting central authority")
+        start_auth_server(auth, scenario)
 
 
 # ============================================================
