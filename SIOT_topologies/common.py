@@ -13,6 +13,10 @@ Modelo usado:
 """
 
 import argparse
+import csv
+import os
+import re
+from datetime import datetime, timezone
 from time import sleep
 
 from containernet.net import Containernet
@@ -536,6 +540,206 @@ def finish(net, cli=True):
 
 
 # ============================================================
+# Métricas estruturadas
+# ============================================================
+
+# Fieldnames canônicos para o CSV de métricas.
+# Todos os tipos de linha (ping_rtt e event) usam este schema,
+# deixando em branco os campos que não se aplicam a cada tipo.
+_METRIC_CSV_FIELDNAMES = [
+    "timestamp", "scenario", "run_id", "metric_type", "phase",
+    # campos para linhas de tipo ping_rtt
+    "src", "dst", "dst_ip", "success", "packet_loss_percent",
+    "rtt_min_ms", "rtt_avg_ms", "rtt_max_ms", "rtt_mdev_ms",
+    # campos para linhas de tipo event
+    "event", "node", "target", "status", "extra",
+]
+
+
+def ensure_metrics_dir(path):
+    """
+    Garante que o diretório de métricas exista.
+    Cria o diretório e os pais se necessário.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        info(f"*** Warning: could not create metrics directory '{path}': {e}\n")
+
+
+def build_metrics_file(scenario, run_id=None, output_dir="./results"):
+    """
+    Retorna o caminho do arquivo CSV de métricas para um cenário/run.
+
+    Formato: <output_dir>/<scenario>-run-<run_id>-metrics.csv
+    Garante que o diretório de saída exista.
+    """
+    ensure_metrics_dir(output_dir)
+    if run_id is not None:
+        filename = f"{scenario}-run-{run_id}-metrics.csv"
+    else:
+        filename = f"{scenario}-metrics.csv"
+    return os.path.join(output_dir, filename)
+
+
+def append_metric_csv(metrics_file, row, fieldnames=None):
+    """
+    Escreve uma linha no CSV de métricas.
+
+    Cria o arquivo com cabeçalho se ainda não existir.
+    Falhas de escrita são logadas mas não interrompem o experimento.
+    """
+    if metrics_file is None:
+        return
+    if fieldnames is None:
+        fieldnames = _METRIC_CSV_FIELDNAMES
+    try:
+        file_exists = os.path.isfile(metrics_file)
+        with open(metrics_file, "a", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=fieldnames,
+                extrasaction="ignore", restval=""
+            )
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        info(f"*** Warning: could not write metric to '{metrics_file}': {e}\n")
+
+
+def record_event_metric(
+    metrics_file, scenario, run_id, event, phase,
+    node=None, target=None, status="started", extra=None
+):
+    """
+    Registra um evento de protocolo no CSV de métricas.
+
+    Parâmetros:
+    - metrics_file: caminho do arquivo CSV.
+    - scenario: nome do cenário.
+    - run_id: identificador do run.
+    - event: nome do evento (ex.: 'auth_server_start', 'join_requested').
+    - phase: fase do experimento (ex.: 'bootstrap', 'join').
+    - node: nó que originou o evento.
+    - target: nó-alvo do evento (opcional).
+    - status: 'started' ou 'completed'.
+    - extra: informação adicional livre (opcional).
+    """
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scenario": scenario or "",
+        "run_id": run_id if run_id is not None else "",
+        "metric_type": "event",
+        "phase": phase,
+        "event": event,
+        "node": node or "",
+        "target": target or "",
+        "status": status,
+        "extra": extra or "",
+    }
+    append_metric_csv(metrics_file, row)
+
+
+def measure_ping_rtt(
+    src, dst,
+    count=5, timeout=1,
+    metrics_file=None, scenario=None, run_id=None,
+    phase="connectivity"
+):
+    """
+    Mede RTT/ping de src para dst e registra no CSV de métricas.
+
+    Parseia estatísticas min/avg/max/mdev quando disponíveis.
+    Falhas de ping ou de parsing não interrompem o experimento:
+    nesse caso ainda registra uma linha com success=False.
+
+    Retorna o dicionário da linha registrada.
+    """
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    try:
+        dst_ip = dst.IP()
+    except Exception:
+        dst_ip = str(dst)
+
+    src_name = getattr(src, "name", str(src))
+    dst_name = getattr(dst, "name", str(dst))
+
+    row = {
+        "timestamp": timestamp,
+        "scenario": scenario or "",
+        "run_id": run_id if run_id is not None else "",
+        "metric_type": "ping_rtt",
+        "phase": phase,
+        "src": src_name,
+        "dst": dst_name,
+        "dst_ip": dst_ip or "",
+        "success": False,
+        "packet_loss_percent": 100.0,
+        "rtt_min_ms": "",
+        "rtt_avg_ms": "",
+        "rtt_max_ms": "",
+        "rtt_mdev_ms": "",
+    }
+
+    try:
+        info(f"*** Measuring RTT: {src_name} -> {dst_name} ({dst_ip})\n")
+        result = src.cmd(f"ping -c {count} -W {timeout} {dst_ip}")
+
+        loss_match = re.search(r"(\d+)% packet loss", result)
+        if loss_match:
+            row["packet_loss_percent"] = float(loss_match.group(1))
+
+        rtt_match = re.search(
+            r"rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+) ms",
+            result
+        )
+        if rtt_match:
+            row["rtt_min_ms"] = float(rtt_match.group(1))
+            row["rtt_avg_ms"] = float(rtt_match.group(2))
+            row["rtt_max_ms"] = float(rtt_match.group(3))
+            row["rtt_mdev_ms"] = float(rtt_match.group(4))
+            row["success"] = True
+        else:
+            row["success"] = False
+
+    except Exception as e:
+        info(
+            f"*** Warning: ping measurement failed "
+            f"({src_name} -> {dst_name}): {e}\n"
+        )
+        row["success"] = False
+
+    append_metric_csv(metrics_file, row)
+    return row
+
+
+def measure_rtt_matrix(
+    nodes,
+    count=5, timeout=1,
+    metrics_file=None, scenario=None, run_id=None,
+    phase="rtt_matrix"
+):
+    """
+    Mede RTT entre todos os pares direcionais de nós (src != dst).
+
+    Usa measure_ping_rtt internamente para cada par.
+    """
+    info(f"*** Measuring RTT matrix for {len(nodes)} nodes (phase={phase})\n")
+    for src in nodes:
+        for dst in nodes:
+            if src is not dst:
+                measure_ping_rtt(
+                    src, dst,
+                    count=count, timeout=timeout,
+                    metrics_file=metrics_file,
+                    scenario=scenario,
+                    run_id=run_id,
+                    phase=phase
+                )
+
+
+# ============================================================
 # Configuração experimental
 # ============================================================
 
@@ -592,6 +796,18 @@ def parse_experiment_args(description="Drone group experiment"):
     parser.add_argument(
         "--movement-interval", type=float, default=1.0,
         help="Interval in seconds between movement steps (default: 1.0)"
+    )
+    parser.add_argument(
+        "--metrics-dir", default="./results",
+        help="Directory where per-run CSV metric files are saved (default: ./results)"
+    )
+    parser.add_argument(
+        "--ping-count", type=int, default=5,
+        help="Number of ping packets per RTT measurement (default: 5)"
+    )
+    parser.add_argument(
+        "--ping-timeout", type=int, default=1,
+        help="Ping wait timeout in seconds per packet (default: 1)"
     )
 
     return parser.parse_args()
