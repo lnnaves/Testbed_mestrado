@@ -6,19 +6,21 @@ topology_group_leave.py
 Cenário:
 - Grupo em rede ad hoc.
 - drone4 sai voluntariamente do grupo.
+- Modo de missão realista: todos os membros legítimos atuais enviam e recebem UDP.
 """
 
 from mininet.log import setLogLevel, info
 
-from common import (
+from common_multi_sender import (
     create_network,
     add_controller,
     create_base_group_topology,
     initialize_adhoc_experiment,
     start_group_member,
     request_leave,
-    start_receiver,
-    start_sender,
+    start_receivers_for,
+    start_senders_for,
+    stop_sender,
     test_connectivity,
     wait,
     finish,
@@ -103,24 +105,33 @@ def run(
         phase="pre_leave"
     )
 
-    wait(10, "starting group traffic")
-    for drone in drones:
-        start_receiver(drone)
+    wait(10, "starting group traffic with all current members")
+    start_receivers_for(drones)
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="traffic_start", phase="pre_leave_traffic",
-        node=drone1.name, status="started"
+        node="all_members", status="started",
+        extra="drone1, drone2, drone3 and drone4 are UDP senders and receivers"
     )
-    start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
+    start_senders_for(drones, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(15, "drone4 voluntarily leaves")
+    wait(15, "drone4 voluntarily leaves while mission traffic continues")
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="leave_requested", phase="leave",
         node=drone4.name, target=auth.name, status="started"
     )
     request_leave(drone4, group_id=group_id)
+
+    wait(2, "allowing leave to complete before stopping drone4 legitimate traffic")
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="traffic_membership_update", phase="post_leave_traffic",
+        node=drone4.name, status="stopped",
+        extra="drone4 stops legitimate UDP sender after leave"
+    )
+    stop_sender(drone4)
 
     measure_rtt_matrix(
         stations,
@@ -133,14 +144,7 @@ def run(
     move_node_in_steps(drone4, "220,220,0", steps=movement_steps, interval=movement_interval)
 
     wait(10, "remaining drones continue communication")
-    record_event_metric(
-        metrics_file, SCENARIO, run_id,
-        event="traffic_start", phase="post_leave_traffic",
-        node=drone2.name, status="started"
-    )
-    start_sender(drone2, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(20, "testing remaining connectivity")
     test_connectivity([auth] + remaining_drones)
 
     measure_rtt_matrix(

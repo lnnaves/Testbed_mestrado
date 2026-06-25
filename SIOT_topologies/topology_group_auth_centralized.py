@@ -7,18 +7,19 @@ Cenário:
 - Formação inicial de grupo com autoridade central lógica.
 - Comunicação wireless em modo ad hoc.
 - Todos os drones são containers Docker via DockerSta.
+- Modo de missão realista: todos os membros legítimos enviam e recebem UDP.
 """
 
 from mininet.log import setLogLevel, info
 
-from common import (
+from common_multi_sender import (
     create_network,
     add_controller,
     create_base_group_topology,
     initialize_adhoc_experiment,
     start_group_member,
-    start_receiver,
-    start_sender,
+    start_receivers_for,
+    start_senders_for,
     wait,
     finish,
     parse_experiment_args,
@@ -54,7 +55,6 @@ def run(
 
     topology = create_base_group_topology(net)
     auth = topology["auth"]
-    drone1 = topology["drone1"]
     drones = topology["drones"]
     stations = topology["stations"]
 
@@ -94,16 +94,16 @@ def run(
         phase="post_auth"
     )
 
-    wait(10, "starting group traffic")
-    for drone in drones:
-        start_receiver(drone)
+    wait(10, "starting group traffic with all legitimate drones")
+    start_receivers_for(drones)
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="traffic_start", phase="steady_state",
-        node=drone1.name, status="started"
+        node="all_members", status="started",
+        extra="all legitimate drones are UDP senders and receivers"
     )
-    start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
+    start_senders_for(drones, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
     wait(15, "steady-state measurement (first window)")
     measure_rtt_matrix(

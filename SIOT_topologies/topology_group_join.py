@@ -7,11 +7,12 @@ Cenário:
 - Grupo inicial em rede ad hoc.
 - drone4 começa fora do alcance.
 - drone4 entra no alcance e solicita entrada no grupo.
+- Modo de missão realista: todos os membros legítimos atuais enviam e recebem UDP.
 """
 
 from mininet.log import setLogLevel, info
 
-from common import (
+from common_multi_sender import (
     create_network,
     add_controller,
     create_base_group_topology,
@@ -19,6 +20,8 @@ from common import (
     start_group_member,
     request_join,
     start_receiver,
+    start_receivers_for,
+    start_senders_for,
     start_sender,
     test_connectivity,
     wait,
@@ -120,18 +123,18 @@ def run(
         phase="pre_join_initial_group"
     )
 
-    wait(10, "starting initial group traffic")
-    for drone in initial_drones:
-        start_receiver(drone)
+    wait(10, "starting initial group traffic with all initial members")
+    start_receivers_for(initial_drones)
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="traffic_start", phase="initial_traffic",
-        node=drone1.name, status="started"
+        node="initial_members", status="started",
+        extra="drone1, drone2 and drone3 are UDP senders and receivers"
     )
-    start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
+    start_senders_for(initial_drones, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(15, "moving drone4 into ad hoc network range")
+    wait(15, "moving drone4 into ad hoc network range while mission traffic continues")
     move_node_in_steps(drone4, "75,55,0", steps=movement_steps, interval=movement_interval)
 
     wait(5, "testing connectivity after drone4 movement")
@@ -144,7 +147,7 @@ def run(
         phase="drone4_in_range"
     )
 
-    wait(2, "drone4 requests group join")
+    wait(2, "drone4 requests group join while mission traffic continues")
     start_receiver(drone4)
     record_event_metric(
         metrics_file, SCENARIO, run_id,
@@ -160,15 +163,16 @@ def run(
         phase="post_join"
     )
 
-    wait(20, "measurement after join")
+    wait(2, "allowing join to complete before drone4 starts legitimate traffic")
     record_event_metric(
         metrics_file, SCENARIO, run_id,
-        event="traffic_start", phase="post_join_traffic",
-        node=drone2.name, status="started"
+        event="traffic_membership_update", phase="post_join_traffic",
+        node=drone4.name, status="started",
+        extra="drone4 becomes a legitimate UDP sender after join"
     )
-    start_sender(drone2, dst="10.0.0.255", port=5001, rate=traffic_rate)
+    start_sender(drone4, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(20, "final measurement window")
+    wait(20, "final measurement window with all four legitimate senders")
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,

@@ -9,19 +9,21 @@ Cenário:
 - drone3 passa a agir de forma maliciosa.
 - autoridade central revoga drone3.
 - drone3 permanece no alcance tentando comunicar.
+- Modo de missão realista: todos os membros legítimos atuais enviam e recebem UDP.
 """
 
 from mininet.log import setLogLevel, info
 
-from common import (
+from common_multi_sender import (
     create_network,
     add_controller,
     create_base_group_topology,
     initialize_adhoc_experiment,
     start_group_member,
     revoke_member,
-    start_receiver,
-    start_sender,
+    start_receivers_for,
+    start_senders_for,
+    stop_sender,
     start_malicious_traffic,
     test_connectivity,
     wait,
@@ -106,18 +108,18 @@ def run(
         phase="pre_revocation"
     )
 
-    wait(10, "starting normal group traffic")
-    for drone in drones:
-        start_receiver(drone)
+    wait(10, "starting normal group traffic with all current members")
+    start_receivers_for(drones)
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="traffic_start", phase="pre_revocation_traffic",
-        node=drone1.name, status="started"
+        node="all_members", status="started",
+        extra="drone1, drone2, drone3 and drone4 are legitimate UDP senders and receivers"
     )
-    start_sender(drone1, dst="10.0.0.255", port=5001, rate=traffic_rate)
+    start_senders_for(drones, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(15, "drone3 starts malicious behavior")
+    wait(15, "drone3 starts malicious behavior while legitimate mission traffic continues")
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="malicious_traffic_start", phase="compromise",
@@ -125,13 +127,22 @@ def run(
     )
     start_malicious_traffic(drone3, dst="10.0.0.255", port=5001)
 
-    wait(5, "central authority revokes drone3")
+    wait(5, "central authority revokes drone3 while traffic continues")
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="revocation_requested", phase="revocation",
         node=auth.name, target=drone3.name, status="started"
     )
     revoke_member(auth, target="drone3", group_id=group_id)
+
+    wait(2, "allowing revocation to complete before stopping drone3 legitimate traffic")
+    record_event_metric(
+        metrics_file, SCENARIO, run_id,
+        event="traffic_membership_update", phase="post_revocation_traffic",
+        node=drone3.name, status="stopped",
+        extra="drone3 stops legitimate UDP sender after revocation; malicious-agent may continue"
+    )
+    stop_sender(drone3)
 
     measure_rtt_matrix(
         stations,
@@ -141,14 +152,7 @@ def run(
     )
 
     wait(10, "legitimate drones continue after revocation")
-    record_event_metric(
-        metrics_file, SCENARIO, run_id,
-        event="traffic_start", phase="post_revocation_traffic",
-        node=drone2.name, status="started"
-    )
-    start_sender(drone2, dst="10.0.0.255", port=5001, rate=traffic_rate)
 
-    wait(15, "testing connectivity after revocation")
     test_connectivity([auth] + legitimate_after_revocation)
 
     measure_rtt_matrix(
