@@ -1,1 +1,11 @@
 __pycache__
+campaign-results/
+campaign-test/
+results/
+*.apconf
+.venv/
+campaign-results/
+campaign-test/
+results/
+*.apconf
+.venv/
