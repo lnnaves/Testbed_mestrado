@@ -26,12 +26,12 @@ O ambiente usa **Containernet + Mininet-WiFi**: cada drone e a autoridade centra
 
 > Quando um drone é revogado de um grupo, **quanto custa** redistribuir a nova chave de grupo aos membros restantes — e **como esse custo cresce** com o tamanho do grupo N?
 
-| Esquema | Estratégia | Custo de mensagens |
-|---|---|---|
-| **naïve** | Nova chave de grupo cifrada **uma vez por membro restante** | **O(n)** |
-| **lkh** | Árvore binária de chaves; re-chaveia só o **caminho** da folha à raiz | **O(log n)** |
+| Esquema | Estratégia | Custo de mensagens | Latência E2E de propagação na rede ad hoc (métrica principal) |
+|---|---|---|---|
+| **naïve** | Nova chave de grupo cifrada **uma vez por membro restante** | **O(n)** | Tende a crescer com N (push sequencial para N-1 membros) |
+| **lkh** | Árvore binária de chaves; re-chaveia só o **caminho** da folha à raiz | **O(log n)** | Tende a se manter mais baixa com N (menos material de rekey) |
 
-A criptografia é **real** (AES-GCM via biblioteca `cryptography`). O protocolo é um **esquema de referência** para *medir* o custo de rekeying — não uma proposta padronizada nova.
+A criptografia é **real** (AES-GCM via biblioteca `cryptography`). Além do custo de mensagens/cripto, o testbed mede a **latência end-to-end real do rekey na rede** (`rekey_e2e_ms`), com **bytes transmitidos** (`rekey_bytes_total`) e **ACKs** (`acks_received`/`acks_expected`).
 
 ---
 
@@ -74,7 +74,7 @@ A criptografia é **real** (AES-GCM via biblioteca `cryptography`). O protocolo 
 3. Tráfego legítimo começa a fluir.
 4. `drone3` passa a se comportar de forma maliciosa (usa chave antiga).
 5. A autoridade **revoga `drone3`** → dispara o rekeying (naïve **ou** LKH).
-6. Mede-se o **custo do rekey** (mensagens, operações cripto, tempo) e a **perda de pacotes** em torno do revoke.
+6. O auth faz **push TCP** da nova chave cifrada para cada membro; os membros **decifram com KEK individual** e respondem **ACK**. Mede-se `rekey_e2e_ms` (métrica principal), `rekey_bytes_total`, `acks_received`/`acks_expected`, além de `rekey_msgs`, `crypto_ops` e `rekey_ms` (CPU local, métrica secundária). A perda de pacotes permanece como métrica complementar.
 7. Os CSVs gerados dentro dos contêineres são copiados para o host.
 
 ---
@@ -173,6 +173,12 @@ python3 plot_figures.py --results-dir ./campaign-results --fig1-logy
 # metrica da Figura 1: rekey_msgs (padrao), crypto_ops ou rekey_ms
 python3 plot_figures.py --results-dir ./campaign-results --metric crypto_ops
 
+# metrica principal: latencia end-to-end real do rekey na rede ad hoc
+python3 plot_figures.py --results-dir ./campaign-results --metric rekey_e2e_ms
+
+# bytes transmitidos no rekey (carga no canal)
+python3 plot_figures.py --results-dir ./campaign-results --metric rekey_bytes_total
+
 # escolher o N exibido na Figura 2 (padrao: maior N disponivel)
 python3 plot_figures.py --results-dir ./campaign-results --figure2-size 32
 
@@ -204,6 +210,8 @@ Ao final da campanha, `figure1_rekey_cost.csv` deve ter **8 linhas de dados** (n
 
 - **naïve:** `rekey_msgs ≈ N − 1` → cresce **linearmente** com o grupo.
 - **lkh:** `rekey_msgs ≈ O(log N)` → cresce muito mais devagar.
+- Na métrica principal de rede, **`rekey_e2e_ms`** tende a crescer com N no naïve (push sequencial O(n)) e a permanecer menor no LKH (escala O(log n)).
+- **`rekey_ms`** continua disponível, mas como **referência secundária** (tempo de CPU local do auth medido no host).
 
 Com o eixo Y logarítmico (`--fig1-logy`), a separação entre as duas curvas evidencia a vantagem de escalabilidade do LKH. As barras de erro são o desvio padrão sobre os runs.
 
@@ -211,6 +219,7 @@ Com o eixo Y logarítmico (`--fig1-logy`), a separação entre as duas curvas ev
 
 - Eixo X centrado em **t = 0 no instante do revoke** (linha vertical vermelha).
 - Mostra a interrupção no tráfego legítimo em torno da revogação, comparando os dois esquemas para um N representativo.
+- É uma métrica **complementar**: como a revogação é lógica (o nó revogado pode continuar fisicamente no alcance) e o tráfego é leve (10 pps), a perda tende a ficar próxima de zero ou dominada por ruído do Wi-Fi emulado.
 
 > Exemplo de leitura (N=4, naïve): no evento de revoke o auth re-chaveia os 3 membros restantes → `rekey_msgs = 3`, `crypto_ops = 3`, `rekey_ms` na ordem de ~1 ms.
 
@@ -222,7 +231,7 @@ Dentro de `--results-dir`:
 
 | Arquivo | Conteúdo |
 |---|---|
-| `figure1_rekey_cost.csv` | `rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms` |
+| `figure1_rekey_cost.csv` | `rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms, rekey_e2e_ms, rekey_bytes_total, acks_received, acks_expected` |
 | `figure2_packet_loss.csv` | `rekey_scheme, group_size, run_id, t_relative_s, loss_pct` |
 | `figure1_rekey_cost.png` / `.pdf` | Gráfico do custo de rekey vs N |
 | `figure2_packet_loss.png` / `.pdf` | Gráfico de perda vs tempo (t=0 no revoke) |
