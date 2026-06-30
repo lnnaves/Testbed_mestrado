@@ -1005,43 +1005,38 @@ def collect_incontainer_csvs(
                 continue
             if not content or not content.strip():
                 continue
-            # node.cmd() roda em um shell de container que pode emitir lixo de
-            # terminal (sequências de escape ANSI como '\x1b[?2004l', '\r', etc.)
-            # ANTES do conteúdo real do CSV. Um simples lstrip não basta porque o
-            # primeiro caractere costuma ser ESC (\x1b), não \r/\n.
-            #
-            # Estratégia robusta: localizar a primeira linha que começa com o
-            # cabeçalho conhecido ("timestamp_utc") e descartar tudo antes dela.
-            # Também remove \r de cada linha (CRLF -> LF). Se o cabeçalho não for
-            # encontrado, cai para uma limpeza genérica (remove ESC e \r iniciais).
-            raw_lines = content.splitlines()
+            # node.cmd() pode emitir lixo de terminal (escape ANSI '\x1b[?2004l',
+            # '\r', etc.) ANTES do conteúdo real. lstrip não basta (1º char é ESC).
+            # Estratégia: remover \r e sequências de escape, e descartar linhas
+            # iniciais até a primeira linha "de cabeçalho" plausível (que contém
+            # vírgulas e não é lixo). Funciona para protocol_latency.csv e
+            # traffic_loss.csv sem hardcode do nome das colunas.
             cleaned_lines = []
-            header_found = False
-            for line in raw_lines:
-                # Remove \r e espaços de borda + qualquer ESC remanescente.
-                stripped = line.replace("\r", "")
-                # Remove sequências de escape ANSI simples no início da linha.
-                while stripped and stripped[0] == "\x1b":
-                    # Pula até o fim da sequência de escape (letra final) ou fim da linha.
+            started = False
+            for line in content.splitlines():
+                s = line.replace("\r", "")
+                # Remove sequência de escape ANSI no início, se houver.
+                while s and s[0] == "\x1b":
                     end = 1
-                    while end < len(stripped) and stripped[end] not in "lhmHJK":
+                    while end < len(s) and s[end] not in "lhmHJK":
                         end += 1
-                    stripped = stripped[end + 1:] if end < len(stripped) else ""
-                if not header_found:
-                    if stripped.startswith("timestamp_utc"):
-                        header_found = True
+                    s = s[end + 1:] if end < len(s) else ""
+                s = s.strip()
+                if not started:
+                    # A primeira linha "boa" é a primeira que tem vírgula e
+                    # caracteres imprimíveis (o cabeçalho do CSV).
+                    if "," in s and s[:1].isprintable() and s[:1] != "":
+                        started = True
                     else:
-                        # Ainda não chegou no cabeçalho: descarta linha de lixo.
                         continue
-                cleaned_lines.append(stripped)
+                if s == "":
+                    continue
+                cleaned_lines.append(s)
 
-            if not header_found or len(cleaned_lines) <= 1:
-                # Sem cabeçalho reconhecível ou só o cabeçalho: nada útil.
+            if len(cleaned_lines) <= 1:
                 continue
 
-            content = "\n".join(cleaned_lines)
-            if not content.endswith("\n"):
-                content = content + "\n"
+            content = "\n".join(cleaned_lines) + "\n"
 
             base, ext = os.path.splitext(fname)
             out_name = f"{node.name}-{base}{ext}"
