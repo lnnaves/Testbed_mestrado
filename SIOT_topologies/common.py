@@ -45,6 +45,7 @@ PROTOCOL_BIN = "/opt/drone-sec/bin/group-auth"
 TRAFFIC_BIN = "/opt/drone-sec/bin/traffic-agent"
 METRICS_BIN = "/opt/drone-sec/bin/metrics-agent"
 MALICIOUS_BIN = "/opt/drone-sec/bin/malicious-agent"
+DEFAULT_MEMBER_PUSH_PORT = 9100
 
 
 # ============================================================
@@ -374,7 +375,12 @@ def prepare_all(nodes, scenario):
 # Protocolo de autenticação em grupo
 # ============================================================
 
-def start_auth_server(auth, scenario, rekey_scheme="naive"):
+def start_auth_server(
+    auth,
+    scenario,
+    rekey_scheme="naive",
+    member_push_port=DEFAULT_MEMBER_PUSH_PORT,
+):
     """
     Inicia a autoridade central dentro do container auth.
     rekey_scheme é repassado ao agente (naive ou lkh).
@@ -387,13 +393,19 @@ def start_auth_server(auth, scenario, rekey_scheme="naive"):
         f"--role auth-server "
         f"--scenario {scenario} "
         f"--rekey-scheme {rekey_scheme} "
+        f"--member-port {member_push_port} "
         f"--listen 0.0.0.0 "
         f"--port 9000 "
         f"> /tmp/drone-logs/auth-server.log 2>&1 &"
     )
 
 
-def start_group_member(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
+def start_group_member(
+    drone,
+    auth_ip="10.0.0.100",
+    group_id="mission-alpha",
+    member_port=DEFAULT_MEMBER_PUSH_PORT,
+):
     """
     Inicia o protocolo no drone como membro do grupo.
     """
@@ -405,12 +417,18 @@ def start_group_member(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
         f"--role member "
         f"--drone-id {drone.name} "
         f"--group-id {group_id} "
+        f"--member-port {member_port} "
         f"--auth-server {auth_ip}:9000 "
         f"> /tmp/drone-logs/group-auth.log 2>&1 &"
     )
 
 
-def request_join(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
+def request_join(
+    drone,
+    auth_ip="10.0.0.100",
+    group_id="mission-alpha",
+    member_port=DEFAULT_MEMBER_PUSH_PORT,
+):
     """
     Solicitação de entrada no grupo.
     """
@@ -423,12 +441,18 @@ def request_join(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
         f"--event join "
         f"--drone-id {drone.name} "
         f"--group-id {group_id} "
+        f"--member-port {member_port} "
         f"--auth-server {auth_ip}:9000 "
         f"> /tmp/drone-logs/join.log 2>&1 &"
     )
 
 
-def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
+def request_leave(
+    drone,
+    auth_ip="10.0.0.100",
+    group_id="mission-alpha",
+    member_port=DEFAULT_MEMBER_PUSH_PORT,
+):
     """
     Solicitação de saída voluntária.
     """
@@ -441,6 +465,7 @@ def request_leave(drone, auth_ip="10.0.0.100", group_id="mission-alpha"):
         f"--event leave "
         f"--drone-id {drone.name} "
         f"--group-id {group_id} "
+        f"--member-port {member_port} "
         f"--auth-server {auth_ip}:9000 "
         f"> /tmp/drone-logs/leave.log 2>&1 &"
     )
@@ -453,6 +478,8 @@ def revoke_member(auth, target, group_id="mission-alpha"):
 
     info(f"*** Revoking {target}\n")
 
+    # Intencionalmente sem "&": bloqueia até o revoke terminar para garantir
+    # que as métricas de rekey (incluindo ACKs) sejam concluídas antes de seguir.
     auth.cmd(
         f"{PROTOCOL_BIN} "
         f"--role auth-server "
@@ -460,7 +487,7 @@ def revoke_member(auth, target, group_id="mission-alpha"):
         f"--target {target} "
         f"--group-id {group_id} "
         f"--auth-server 127.0.0.1:9000 "
-        f"> /tmp/drone-logs/revoke-{target}.log 2>&1 &"
+        f"> /tmp/drone-logs/revoke-{target}.log 2>&1"
     )
 
 
