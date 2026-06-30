@@ -118,17 +118,8 @@ def run_cell(scheme, size, runs, args):
 # ============================================================
 
 def _find_protocol_csvs(cell_dir):
-    """
-    Procura protocol_latency.csv produzidos pelos runs dentro de cell_dir.
-
-    Aceita tanto subpastas por run (<scenario>-run-<N>/protocol_latency.csv)
-    quanto um protocol_latency.csv direto na pasta, e arquivos copiados com
-    sufixo de run.
-    """
     patterns = [
-        os.path.join(cell_dir, "**", "protocol_latency.csv"),
-        os.path.join(cell_dir, "**", "protocol_latency-run-*.csv"),
-        os.path.join(cell_dir, "protocol_latency*.csv"),
+        os.path.join(cell_dir, "**", "*protocol_latency*.csv"),
     ]
     found = []
     for p in patterns:
@@ -138,9 +129,7 @@ def _find_protocol_csvs(cell_dir):
 
 def _find_loss_csvs(cell_dir):
     patterns = [
-        os.path.join(cell_dir, "**", "traffic_loss.csv"),
-        os.path.join(cell_dir, "**", "traffic_loss-run-*.csv"),
-        os.path.join(cell_dir, "traffic_loss*.csv"),
+        os.path.join(cell_dir, "**", "*traffic_loss*.csv"),
     ]
     found = []
     for p in patterns:
