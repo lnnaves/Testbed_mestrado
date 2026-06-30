@@ -1005,8 +1005,13 @@ def collect_incontainer_csvs(
                 continue
             if not content or not content.strip():
                 continue
-            # Nome de saída inclui run e nó; run_campaign sabe inferir o run_id
-            # a partir do diretório run-<id>.
+            # node.cmd() pode prefixar uma linha em branco / espaços à saída do
+            # container. Remove linhas vazias do INÍCIO para não quebrar o
+            # cabeçalho do CSV (csv.DictReader trataria a linha vazia como header).
+            content = content.lstrip("\r\n")
+            # Garante que o arquivo termine com newline.
+            if not content.endswith("\n"):
+                content = content + "\n"
             base, ext = os.path.splitext(fname)
             out_name = f"{node.name}-{base}{ext}"
             out_path = os.path.join(dest_dir, out_name)
