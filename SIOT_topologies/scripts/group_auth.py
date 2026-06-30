@@ -49,7 +49,7 @@ import socket
 import socketserver
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -68,7 +68,7 @@ _CSV_LOCK = threading.Lock()
 
 
 def now():
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat()
 
 
 def log(msg):
