@@ -1005,13 +1005,44 @@ def collect_incontainer_csvs(
                 continue
             if not content or not content.strip():
                 continue
-            # node.cmd() pode prefixar uma linha em branco / espaços à saída do
-            # container. Remove linhas vazias do INÍCIO para não quebrar o
-            # cabeçalho do CSV (csv.DictReader trataria a linha vazia como header).
-            content = content.lstrip("\r\n")
-            # Garante que o arquivo termine com newline.
+            # node.cmd() roda em um shell de container que pode emitir lixo de
+            # terminal (sequências de escape ANSI como '\x1b[?2004l', '\r', etc.)
+            # ANTES do conteúdo real do CSV. Um simples lstrip não basta porque o
+            # primeiro caractere costuma ser ESC (\x1b), não \r/\n.
+            #
+            # Estratégia robusta: localizar a primeira linha que começa com o
+            # cabeçalho conhecido ("timestamp_utc") e descartar tudo antes dela.
+            # Também remove \r de cada linha (CRLF -> LF). Se o cabeçalho não for
+            # encontrado, cai para uma limpeza genérica (remove ESC e \r iniciais).
+            raw_lines = content.splitlines()
+            cleaned_lines = []
+            header_found = False
+            for line in raw_lines:
+                # Remove \r e espaços de borda + qualquer ESC remanescente.
+                stripped = line.replace("\r", "")
+                # Remove sequências de escape ANSI simples no início da linha.
+                while stripped and stripped[0] == "\x1b":
+                    # Pula até o fim da sequência de escape (letra final) ou fim da linha.
+                    end = 1
+                    while end < len(stripped) and stripped[end] not in "lhmHJK":
+                        end += 1
+                    stripped = stripped[end + 1:] if end < len(stripped) else ""
+                if not header_found:
+                    if stripped.startswith("timestamp_utc"):
+                        header_found = True
+                    else:
+                        # Ainda não chegou no cabeçalho: descarta linha de lixo.
+                        continue
+                cleaned_lines.append(stripped)
+
+            if not header_found or len(cleaned_lines) <= 1:
+                # Sem cabeçalho reconhecível ou só o cabeçalho: nada útil.
+                continue
+
+            content = "\n".join(cleaned_lines)
             if not content.endswith("\n"):
                 content = content + "\n"
+
             base, ext = os.path.splitext(fname)
             out_name = f"{node.name}-{base}{ext}"
             out_path = os.path.join(dest_dir, out_name)
