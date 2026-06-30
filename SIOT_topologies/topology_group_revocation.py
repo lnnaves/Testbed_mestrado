@@ -9,6 +9,14 @@ Cenário:
 - drone3 passa a agir de forma maliciosa.
 - autoridade central revoga drone3.
 - drone3 permanece no alcance tentando comunicar.
+
+Suporta varredura de campanha:
+- --num-drones N para variar o tamanho do grupo (4, 8, 16, 32).
+- --rekey-scheme naive|lkh para escolher o esquema de rekey medido.
+- --fast / --wait-scale para encurtar os waits em campanhas grandes.
+Ao final de cada run, os CSVs in-container (protocol_latency.csv,
+traffic_loss.csv) são copiados para <metrics-dir>/run-<id>/ para que o
+run_campaign.py possa consolidá-los.
 """
 
 from mininet.log import setLogLevel, info
@@ -31,6 +39,7 @@ from common import (
     build_metrics_file,
     record_event_metric,
     measure_rtt_matrix,
+    collect_incontainer_csvs,
 )
 
 
@@ -50,6 +59,8 @@ def run(
     metrics_dir="./results",
     ping_count=5,
     ping_timeout=1,
+    num_drones=4,
+    rekey_scheme="naive",
 ):
     net = create_network()
 
@@ -59,7 +70,8 @@ def run(
 
     topology = create_base_group_topology(
         net,
-        drone_roles={"drone3": "compromised_member"}
+        drone_roles={"drone3": "compromised_member"},
+        num_drones=num_drones
     )
     auth = topology["auth"]
     drone1 = topology["drone1"]
@@ -68,7 +80,8 @@ def run(
     drone4 = topology["drone4"]
     drones = topology["drones"]
     stations = topology["stations"]
-    legitimate_after_revocation = [drone1, drone2, drone4]
+    # Legítimos após a revogação: todos os drones menos o revogado (drone3).
+    legitimate_after_revocation = [d for d in drones if d.name != "drone3"]
 
     metrics_file = build_metrics_file(SCENARIO, run_id=run_id, output_dir=metrics_dir)
     info(f"*** Metrics file: {metrics_file}\n")
@@ -76,18 +89,21 @@ def run(
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="scenario_start", phase="bootstrap",
-        node="orchestrator", status="started"
+        node="orchestrator", status="started",
+        extra=f"num_drones={num_drones},rekey_scheme={rekey_scheme}"
     )
 
     initialize_adhoc_experiment(
         net, stations, SCENARIO, auth=auth,
+        rekey_scheme=rekey_scheme,
         ssid=ssid, channel=channel, mode=mode
     )
 
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="auth_server_start", phase="bootstrap",
-        node=auth.name, status="started"
+        node=auth.name, status="started",
+        extra=f"rekey_scheme={rekey_scheme}"
     )
 
     wait(3, "forming group before compromise detection")
@@ -162,6 +178,14 @@ def run(
     # Isso é intencional: queremos testar exclusão lógica, não desconexão física.
     wait(25, "revoked drone remains nearby for validation")
 
+    # Coleta os CSVs gerados dentro dos containers para o host, para que o
+    # run_campaign.py consiga consolidar figure1/figure2.
+    collect_incontainer_csvs(
+        [auth] + drones,
+        run_id=run_id,
+        output_dir=metrics_dir,
+    )
+
     record_event_metric(
         metrics_file, SCENARIO, run_id,
         event="scenario_end", phase="teardown",
@@ -189,6 +213,8 @@ if __name__ == "__main__":
             metrics_dir=args.metrics_dir,
             ping_count=args.ping_count,
             ping_timeout=args.ping_timeout,
+            num_drones=args.num_drones,
+            rekey_scheme=args.rekey_scheme,
         )
 
     run_experiment_runs(run_once, runs=args.runs, cli=not args.no_cli)
