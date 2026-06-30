@@ -163,12 +163,30 @@ def create_base_group_topology(
     drone_roles=None,
     auth_position="50,50,0",
     auth_range=130,
-    drone_range=100
+    drone_range=100,
+    num_drones=4
 ):
     """
-    Cria a topologia base reutilizável com auth central e quatro drones.
-    """
+    Cria a topologia base reutilizável com auth central e N drones.
 
+    num_drones controla quantos drones são criados (padrão 4, preservando o
+    comportamento original). Para num_drones > 4, os drones extras (drone5,
+    drone6, ...) são criados programaticamente e ficam disponíveis via a lista
+    retornada em "drones". As chaves nomeadas "drone1".."drone4" continuam
+    presentes no dicionário de retorno quando num_drones >= 4, para manter
+    compatibilidade com os cenários topology_*.py existentes.
+
+    Posições:
+    - Os 4 primeiros drones mantêm as posições padrão históricas.
+    - Drones adicionais são distribuídos deterministicamente em um círculo ao
+      redor da posição do auth, dentro de drone_range, garantindo que comecem
+      no alcance de rádio do auth.
+
+    IPs: 10.0.0.<i>/24 para i em 1..N. O auth permanece em 10.0.0.100/24.
+    """
+    import math as _math
+
+    # Posições/roles padrão históricos para os 4 primeiros drones.
     default_positions = {
         "drone1": "30,50,0",
         "drone2": "40,60,0",
@@ -181,6 +199,26 @@ def create_base_group_topology(
         "drone3": "initial_member",
         "drone4": "initial_member"
     }
+
+    # Centro (posição do auth) para gerar drones extras em círculo.
+    try:
+        ax, ay, az = [float(v) for v in str(auth_position).split(",")]
+    except Exception:
+        ax, ay, az = 50.0, 50.0, 0.0
+
+    # Raio do círculo dos drones extras: metade do alcance do drone, para
+    # garantir que fiquem confortavelmente dentro do alcance do auth.
+    ring_radius = max(10.0, drone_range / 2.0)
+
+    # Gera posições/roles padrão para drones além de 4 (determinístico).
+    for i in range(5, num_drones + 1):
+        name = f"drone{i}"
+        # Distribui em círculo; ângulo determinístico pelo índice.
+        angle = 2.0 * _math.pi * ((i - 1) / max(1, num_drones))
+        x = ax + ring_radius * _math.cos(angle)
+        y = ay + ring_radius * _math.sin(angle)
+        default_positions[name] = f"{x:.1f},{y:.1f},0"
+        default_roles[name] = "initial_member"
 
     if drone_positions:
         default_positions.update(drone_positions)
@@ -196,51 +234,32 @@ def create_base_group_topology(
         range_=auth_range
     )
 
-    drone1 = add_drone(
-        net,
-        name="drone1",
-        ip="10.0.0.1/24",
-        position=default_positions["drone1"],
-        role=default_roles["drone1"],
-        range_=drone_range
-    )
-    drone2 = add_drone(
-        net,
-        name="drone2",
-        ip="10.0.0.2/24",
-        position=default_positions["drone2"],
-        role=default_roles["drone2"],
-        range_=drone_range
-    )
-    drone3 = add_drone(
-        net,
-        name="drone3",
-        ip="10.0.0.3/24",
-        position=default_positions["drone3"],
-        role=default_roles["drone3"],
-        range_=drone_range
-    )
-    drone4 = add_drone(
-        net,
-        name="drone4",
-        ip="10.0.0.4/24",
-        position=default_positions["drone4"],
-        role=default_roles["drone4"],
-        range_=drone_range
-    )
+    drones = []
+    named = {}
+    for i in range(1, num_drones + 1):
+        name = f"drone{i}"
+        drone = add_drone(
+            net,
+            name=name,
+            ip=f"10.0.0.{i}/24",
+            position=default_positions[name],
+            role=default_roles[name],
+            range_=drone_range
+        )
+        drones.append(drone)
+        named[name] = drone
 
-    drones = [drone1, drone2, drone3, drone4]
     stations = [auth] + drones
 
-    return {
+    result = {
         "auth": auth,
         "drones": drones,
         "stations": stations,
-        "drone1": drone1,
-        "drone2": drone2,
-        "drone3": drone3,
-        "drone4": drone4
     }
+    # Preserva as chaves nomeadas para compatibilidade (quando existirem).
+    result.update(named)
+
+    return result
 
 
 def configure_adhoc_network(
