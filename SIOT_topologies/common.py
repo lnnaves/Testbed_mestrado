@@ -310,13 +310,13 @@ def start_network(net):
 
     info("*** Network started\n")
 
-
 def initialize_adhoc_experiment(
     net,
     stations,
     scenario,
     connectivity_nodes=None,
     auth=None,
+    rekey_scheme="naive",
     ssid="drone-adhoc-net",
     channel=5,
     mode="g",
@@ -347,7 +347,7 @@ def initialize_adhoc_experiment(
 
     if auth is not None:
         wait(auth_start_wait, "starting central authority")
-        start_auth_server(auth, scenario)
+        start_auth_server(auth, scenario, rekey_scheme=rekey_scheme)
 
 
 # ============================================================
@@ -373,17 +373,19 @@ def prepare_all(nodes, scenario):
 # Protocolo de autenticação em grupo
 # ============================================================
 
-def start_auth_server(auth, scenario):
+def start_auth_server(auth, scenario, rekey_scheme="naive"):
     """
     Inicia a autoridade central dentro do container auth.
+    rekey_scheme é repassado ao agente (naive ou lkh).
     """
 
-    info(f"*** Starting auth server in {auth.name}\n")
+    info(f"*** Starting auth server in {auth.name} (rekey_scheme={rekey_scheme})\n")
 
     auth.cmd(
         f"{PROTOCOL_BIN} "
         f"--role auth-server "
         f"--scenario {scenario} "
+        f"--rekey-scheme {rekey_scheme} "
         f"--listen 0.0.0.0 "
         f"--port 9000 "
         f"> /tmp/drone-logs/auth-server.log 2>&1 &"
@@ -526,10 +528,26 @@ def start_metrics_all(nodes, scenario):
 # Utilidades
 # ============================================================
 
-def wait(seconds, message):
-    info(f"\n*** Waiting {seconds}s: {message}\n")
-    sleep(seconds)
+# Escala global aplicada a todas as chamadas de wait().
+# Padrão 1.0 (comportamento idêntico ao original). Campanhas com --fast usam
+# um valor menor (ex.: 0.2) para reduzir a duração total sem alterar a lógica.
+_WAIT_SCALE = 1.0
 
+def set_wait_scale(scale):
+    """Define o multiplicador global de wait(). Use 1.0 para comportamento normal."""
+    global _WAIT_SCALE
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 1.0
+    if scale <= 0:
+        scale = 1.0
+    _WAIT_SCALE = scale
+
+def wait(seconds, message):
+    scaled = seconds * _WAIT_SCALE
+    info(f"\n*** Waiting {scaled:.2f}s: {message} (scale={_WAIT_SCALE})\n")
+    sleep(scaled)
 
 def test_connectivity(nodes):
     """
@@ -829,7 +847,28 @@ def parse_experiment_args(description="Drone group experiment"):
         help="Ping wait timeout in seconds per packet (default: 1)"
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--rekey-scheme", choices=["naive", "lkh"], default="naive",
+        help="Group rekeying scheme passed to the auth server: naive (O(n)) or lkh (O(log n)) (default: naive)"
+    )
+    parser.add_argument(
+        "--num-drones", type=int, default=4,
+        help="Number of drones in the topology (default: 4)"
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Shorten wait() durations to speed up large campaigns (default: off)"
+    )
+    parser.add_argument(
+        "--wait-scale", type=float, default=1.0,
+        help="Multiplier applied to every wait() duration (default: 1.0). --fast sets this to 0.2"
+    )
+    args = parser.parse_args()
+    # --fast é um atalho para encurtar drasticamente os waits da campanha.
+    if getattr(args, "fast", False) and args.wait_scale == 1.0:
+        args.wait_scale = 0.2
+    set_wait_scale(args.wait_scale)
+    return args
 
 
 def run_experiment_runs(run_once, runs=1, cli=True):
@@ -921,3 +960,56 @@ def move_node_in_steps(node, target_position, steps=1, interval=1.0):
         node.setPosition(pos)
         if step < steps:
             sleep(interval)
+
+# ============================================================
+# Coleta de CSVs in-container para o host
+# ============================================================
+
+def collect_incontainer_csvs(
+    nodes,
+    run_id,
+    output_dir="./results",
+    files=("protocol_latency.csv", "traffic_loss.csv"),
+    logs_dir="/tmp/drone-logs",
+):
+    """
+    Copia CSVs gerados DENTRO dos containers (em logs_dir) para o host.
+
+    Para cada nó e cada arquivo em `files`, lê o conteúdo com `node.cmd("cat ...")`
+    e grava em:
+        <output_dir>/<scenario-run-dir>/<node.name>-<arquivo>
+    O run_id é embutido no nome para não sobrescrever entre runs.
+
+    Isso é necessário porque o orquestrador NÃO enxerga o /tmp do container
+    automaticamente. Falhas (arquivo ausente) são ignoradas silenciosamente.
+    """
+    dest_dir = os.path.join(output_dir, f"run-{run_id}")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception as e:
+        info(f"*** Warning: could not create CSV dest dir '{dest_dir}': {e}\n")
+        return
+
+    for node in nodes:
+        for fname in files:
+            src = f"{logs_dir}/{fname}"
+            try:
+                content = node.cmd(f"cat {src} 2>/dev/null")
+            except Exception as e:
+                info(f"*** Warning: failed to read {src} from {node.name}: {e}\n")
+                continue
+            if not content or not content.strip():
+                continue
+            # Nome de saída inclui run e nó; run_campaign sabe inferir o run_id
+            # a partir do diretório run-<id>.
+            base, ext = os.path.splitext(fname)
+            out_name = f"{node.name}-{base}{ext}"
+            out_path = os.path.join(dest_dir, out_name)
+            try:
+                with open(out_path, "w") as f:
+                    f.write(content)
+                info(f"*** Collected {src} from {node.name} -> {out_path}\n")
+            except Exception as e:
+                info(f"*** Warning: could not write {out_path}: {e}\n")
+
+
