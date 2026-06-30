@@ -41,6 +41,7 @@ Saídas:
 """
 
 import argparse
+import base64
 import csv
 import json
 import math
@@ -80,14 +81,29 @@ def _new_key():
     return AESGCM.generate_key(bit_length=128)
 
 
+def _b64e(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+def _b64d(data):
+    return base64.b64decode(data.encode("ascii"))
+
+
 def _encrypt(key, plaintext):
     """
     Cifra `plaintext` (bytes) sob `key` com AES-GCM e nonce aleatório.
-    Conta como UMA operação criptográfica. Retorna os bytes do ciphertext
-    (não precisamos decifrar; o objetivo é medir o custo real da operação).
+    Conta como UMA operação criptográfica. Retorna nonce||ciphertext para que
+    o destinatário possa decifrar sem estado adicional.
     """
     nonce = os.urandom(12)
-    return AESGCM(key).encrypt(nonce, plaintext, None)
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+    return nonce + ciphertext
+
+
+def _decrypt(key, nonce_and_ciphertext):
+    nonce = nonce_and_ciphertext[:12]
+    ciphertext = nonce_and_ciphertext[12:]
+    return AESGCM(key).decrypt(nonce, ciphertext, None)
 
 
 def emit_event(
@@ -103,6 +119,8 @@ def emit_event(
     rekey_msgs="",
     crypto_ops="",
     rekey_ms="",
+    rekey_e2e_ms="",
+    rekey_bytes_total="",
     extra="",
 ):
     """
@@ -137,6 +155,8 @@ def emit_event(
                     "rekey_msgs",
                     "crypto_ops",
                     "rekey_ms",
+                    "rekey_e2e_ms",
+                    "rekey_bytes_total",
                     # ---------------------------------------
                     "extra",
                 ])
@@ -155,6 +175,8 @@ def emit_event(
                 rekey_msgs if rekey_msgs is not None else "",
                 crypto_ops if crypto_ops is not None else "",
                 f"{rekey_ms:.3f}" if isinstance(rekey_ms, (int, float)) else (rekey_ms or ""),
+                f"{rekey_e2e_ms:.3f}" if isinstance(rekey_e2e_ms, (int, float)) else (rekey_e2e_ms or ""),
+                rekey_bytes_total if rekey_bytes_total is not None else "",
                 extra,
             ])
 
@@ -332,17 +354,19 @@ class LKHTree:
 # ============================================================
 
 class GroupState:
-    def __init__(self, group_id, rekey_scheme="naive"):
+    def __init__(self, group_id, rekey_scheme="naive", member_push_port=9100):
         self.group_id = group_id
         self.rekey_scheme = rekey_scheme
         self.members = []          # ordem de inserção; tamanho = N
         self.revoked = set()
         self.epoch = 1
         self.lock = threading.Lock()
+        self.member_push_port = int(member_push_port)
 
         # Estado criptográfico REAL.
         self.group_key = _new_key()             # usado pelo esquema naive
         self.member_kek = {}                    # member_id -> KEK individual (naive)
+        self.member_endpoint = {}               # member_id -> (ip, port)
         self.lkh = LKHTree() if rekey_scheme == "lkh" else None
 
     # ---------- rekeying real ----------
@@ -397,6 +421,44 @@ class GroupState:
             return self._rekey_lkh_remove(member_id)
         return self._rekey_naive_remove()
 
+    def _current_group_key(self):
+        if self.rekey_scheme == "lkh" and self.lkh is not None and self.lkh.root is not None:
+            return self.lkh.root.key
+        return self.group_key
+
+    def update_member_endpoint(self, drone_id, ip, port=None):
+        if not drone_id:
+            return
+        try:
+            p = int(port) if port is not None else self.member_push_port
+        except Exception:
+            p = self.member_push_port
+        with self.lock:
+            self.member_endpoint[drone_id] = (ip, p)
+
+    def _build_rekey_push_targets(self):
+        """
+        Gera os payloads cifrados por membro para transmissão real na rede.
+        """
+        with self.lock:
+            group_key = self._current_group_key()
+            if group_key is None:
+                return []
+            targets = []
+            for member_id in self.members:
+                endpoint = self.member_endpoint.get(member_id)
+                if endpoint is None:
+                    continue
+                kek = self.member_kek.setdefault(member_id, _new_key())
+                ciphertext = _encrypt(kek, group_key)
+                targets.append({
+                    "member_id": member_id,
+                    "host": endpoint[0],
+                    "port": endpoint[1],
+                    "ciphertext_b64": _b64e(ciphertext),
+                })
+            return targets
+
     # ---------- API de protocolo ----------
 
     def register(self, drone_id):
@@ -419,6 +481,7 @@ class GroupState:
                         self.lkh.leaves[drone_id] = LKHNode(member_id=drone_id)
                         self.lkh._rebuild()
 
+            kek = self.member_kek.setdefault(drone_id, _new_key())
             return {
                 "status": "accepted",
                 "event": "register",
@@ -426,6 +489,7 @@ class GroupState:
                 "group_id": self.group_id,
                 "epoch": self.epoch,
                 "members": sorted(self.members),
+                "kek_b64": _b64e(kek),
             }
 
     def join(self, drone_id):
@@ -445,6 +509,7 @@ class GroupState:
             self.epoch += 1
             n_msgs, n_ops, rekey_ms = self._do_rekey_add(drone_id)
 
+            kek = self.member_kek.setdefault(drone_id, _new_key())
             return {
                 "status": "accepted",
                 "event": "join",
@@ -457,6 +522,7 @@ class GroupState:
                 "rekey_msgs": n_msgs,
                 "crypto_ops": n_ops,
                 "rekey_ms": rekey_ms,
+                "kek_b64": _b64e(kek),
             }
 
     def leave(self, drone_id):
@@ -464,6 +530,7 @@ class GroupState:
             if drone_id in self.members:
                 self.members.remove(drone_id)
             self.member_kek.pop(drone_id, None)
+            self.member_endpoint.pop(drone_id, None)
 
             self.epoch += 1
             n_msgs, n_ops, rekey_ms = self._do_rekey_remove(drone_id)
@@ -487,6 +554,7 @@ class GroupState:
             if drone_id in self.members:
                 self.members.remove(drone_id)
             self.member_kek.pop(drone_id, None)
+            self.member_endpoint.pop(drone_id, None)
             self.revoked.add(drone_id)
 
             self.epoch += 1
@@ -526,6 +594,75 @@ class GroupState:
 
 class AuthTCPHandler(socketserver.StreamRequestHandler):
     group_state = None
+    rekey_ack_timeout = 2.0
+    rekey_ack_retries = 1
+
+    @classmethod
+    def _send_push_and_wait_ack(cls, host, port, payload):
+        attempts = max(1, cls.rekey_ack_retries)
+        total_bytes = 0
+        last_error = ""
+        for _ in range(attempts):
+            try:
+                response, _elapsed_ms, sent_bytes = send_request_with_stats(
+                    host, port, payload, timeout=cls.rekey_ack_timeout
+                )
+                total_bytes += sent_bytes
+                if response.get("status") == "ack":
+                    return True, response, total_bytes, ""
+                last_error = response.get("reason", "non_ack_response")
+            except Exception as exc:
+                last_error = str(exc)
+        return False, {"status": "error", "reason": last_error}, total_bytes, last_error
+
+    @classmethod
+    def _dispatch_rekey_push(cls, event, response):
+        """
+        Distribui material de rekey cifrado para os membros e coleta ACKs.
+        Atualiza o dicionário `response` com métricas E2E e bytes transmitidos.
+        """
+        if response.get("status") != "accepted":
+            return 0.0, 0
+        targets = cls.group_state._build_rekey_push_targets()
+        if not targets:
+            return 0.0, 0
+
+        t0 = time.perf_counter()
+        total_bytes = 0
+        acked = []
+        failed = []
+
+        for target in targets:
+            payload = {
+                "event": "rekey_push",
+                "group_id": cls.group_state.group_id,
+                "epoch": response.get("epoch"),
+                "rekey_event": event,
+                "rekey_scheme": cls.group_state.rekey_scheme,
+                "member_id": target["member_id"],
+                "ciphertext_b64": target["ciphertext_b64"],
+                "timestamp": now(),
+            }
+            ok, ack_response, sent_bytes, err = cls._send_push_and_wait_ack(
+                target["host"], target["port"], payload
+            )
+            total_bytes += sent_bytes
+            if ok:
+                acked.append(target["member_id"])
+            else:
+                failed.append(f"{target['member_id']}:{err}")
+            log(
+                f"rekey_push target={target['member_id']} "
+                f"endpoint={target['host']}:{target['port']} "
+                f"status={ack_response.get('status')} reason={ack_response.get('reason', '')}"
+            )
+
+        rekey_e2e_ms = (time.perf_counter() - t0) * 1000.0
+        response["acks_received"] = len(acked)
+        response["acks_expected"] = len(targets)
+        if failed:
+            response["ack_failures"] = failed
+        return rekey_e2e_ms, total_bytes
 
     def handle(self):
         peer = self.client_address
@@ -544,8 +681,16 @@ class AuthTCPHandler(socketserver.StreamRequestHandler):
         event = request.get("event")
         drone_id = request.get("drone_id")
         target = request.get("target")
+        member_port = request.get("member_port")
 
         log(f"received request from {peer}: {request}")
+
+        if drone_id and event in {"register", "join", "leave", "status"}:
+            self.group_state.update_member_endpoint(
+                drone_id=drone_id,
+                ip=peer[0],
+                port=member_port,
+            )
 
         if event == "register":
             response = self.group_state.register(drone_id)
@@ -563,6 +708,11 @@ class AuthTCPHandler(socketserver.StreamRequestHandler):
                 "reason": "unknown_event",
                 "received": request,
             }
+
+        if event in {"join", "leave", "revoke"} and response.get("status") == "accepted":
+            rekey_e2e_ms, rekey_bytes_total = self._dispatch_rekey_push(event, response)
+            response["rekey_e2e_ms"] = rekey_e2e_ms
+            response["rekey_bytes_total"] = rekey_bytes_total
 
         log(f"response: {response}")
         self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
@@ -603,6 +753,36 @@ def send_request(host, port, payload, timeout=5):
     return response, elapsed_ms
 
 
+def send_request_with_stats(host, port, payload, timeout=5):
+    """
+    Envia request JSON por linha e retorna resposta, tempo e bytes enviados.
+    Retorno: (response_dict, elapsed_ms, sent_bytes).
+    """
+    start = time.time()
+    sent_bytes = 0
+
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        wire = (json.dumps(payload) + "\n").encode("utf-8")
+        sock.sendall(wire)
+        sent_bytes = len(wire)
+
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+
+    elapsed_ms = (time.time() - start) * 1000
+
+    if data:
+        response = json.loads(data.decode("utf-8").strip())
+    else:
+        response = {"status": "error", "reason": "empty_response"}
+
+    return response, elapsed_ms, sent_bytes
+
+
 # ============================================================
 # Modos de execução
 # ============================================================
@@ -612,15 +792,20 @@ def run_auth_server(args):
     port = int(args.port or 9000)
 
     AuthTCPHandler.group_state = GroupState(
-        args.group_id, rekey_scheme=args.rekey_scheme
+        args.group_id,
+        rekey_scheme=args.rekey_scheme,
+        member_push_port=args.member_port,
     )
+    AuthTCPHandler.rekey_ack_timeout = float(args.rekey_ack_timeout)
+    AuthTCPHandler.rekey_ack_retries = int(args.rekey_ack_retries)
 
     server = socketserver.ThreadingTCPServer((host, port), AuthTCPHandler)
     server.daemon_threads = True
 
     log(
         f"auth server started on {host}:{port}, group_id={args.group_id}, "
-        f"rekey_scheme={args.rekey_scheme}"
+        f"rekey_scheme={args.rekey_scheme}, member_push_port={args.member_port}, "
+        f"ack_timeout={args.rekey_ack_timeout}s, ack_retries={args.rekey_ack_retries}"
     )
 
     try:
@@ -632,20 +817,98 @@ def run_auth_server(args):
         log("auth server stopped")
 
 
+class MemberRekeyPushHandler(socketserver.StreamRequestHandler):
+    member_ctx = None
+
+    def handle(self):
+        raw = self.rfile.readline().decode("utf-8").strip()
+        if not raw:
+            return
+        try:
+            request = json.loads(raw)
+        except Exception:
+            self.wfile.write((json.dumps({"status": "error", "reason": "invalid_json"}) + "\n").encode("utf-8"))
+            return
+
+        if request.get("event") != "rekey_push":
+            self.wfile.write((json.dumps({"status": "error", "reason": "unknown_event"}) + "\n").encode("utf-8"))
+            return
+
+        ciphertext_b64 = request.get("ciphertext_b64", "")
+        epoch = request.get("epoch")
+        try:
+            ciphertext = _b64d(ciphertext_b64)
+            with self.member_ctx["lock"]:
+                member_kek = self.member_ctx.get("member_kek")
+                if member_kek is None:
+                    raise ValueError(
+                        f"Member KEK not provisioned for {self.member_ctx['drone_id']}"
+                    )
+                group_key = _decrypt(member_kek, ciphertext)
+                self.member_ctx["group_key"] = group_key
+                self.member_ctx["epoch"] = epoch
+            response = {
+                "status": "ack",
+                "drone_id": self.member_ctx["drone_id"],
+                "epoch": epoch,
+            }
+        except Exception as exc:
+            response = {
+                "status": "error",
+                "reason": f"rekey_decrypt_failed:{exc}",
+                "drone_id": self.member_ctx["drone_id"],
+            }
+        self.wfile.write((json.dumps(response) + "\n").encode("utf-8"))
+
+
+def start_member_rekey_listener(args, member_ctx):
+    MemberRekeyPushHandler.member_ctx = member_ctx
+    server = socketserver.ThreadingTCPServer(
+        ("0.0.0.0", int(args.member_port)),
+        MemberRekeyPushHandler,
+    )
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log(
+        f"member={args.drone_id} rekey listener started on 0.0.0.0:{args.member_port}"
+    )
+    return server
+
+
+def new_member_context(drone_id):
+    """Inicializa o contexto criptográfico local do membro."""
+    return {
+        "drone_id": drone_id,
+        "member_kek": None,
+        "group_key": None,
+        "epoch": None,
+        "lock": threading.Lock(),
+    }
+
+
 def run_member(args):
     host, port = parse_host_port(args.auth_server)
+    member_ctx = new_member_context(args.drone_id)
+    rekey_server = start_member_rekey_listener(args, member_ctx)
 
     payload = {
         "event": "register",
         "drone_id": args.drone_id,
         "group_id": args.group_id,
+        "member_port": int(args.member_port),
         "timestamp": now(),
     }
 
     try:
-        response, elapsed_ms = send_request(host, port, payload)
+        response, elapsed_ms = send_request(host, port, payload, timeout=30)
         status = response.get("status", "unknown")
         epoch = response.get("epoch")
+        kek_b64 = response.get("kek_b64")
+        if kek_b64:
+            with member_ctx["lock"]:
+                member_ctx["member_kek"] = _b64d(kek_b64)
+                member_ctx["epoch"] = epoch
         log(
             f"member={args.drone_id} register_response={response} "
             f"auth_time_ms={elapsed_ms:.3f}"
@@ -676,6 +939,8 @@ def run_member(args):
     while True:
         if args.duration and (time.time() - start_t) >= args.duration:
             log(f"member={args.drone_id} duration reached, exiting")
+            rekey_server.shutdown()
+            rekey_server.server_close()
             return
 
         time.sleep(args.heartbeat_interval)
@@ -684,11 +949,12 @@ def run_member(args):
             "event": "status",
             "drone_id": args.drone_id,
             "group_id": args.group_id,
+            "member_port": int(args.member_port),
             "timestamp": now(),
         }
 
         try:
-            response, elapsed_ms = send_request(host, port, status_payload)
+            response, elapsed_ms = send_request(host, port, status_payload, timeout=5)
             log(
                 f"member={args.drone_id} heartbeat "
                 f"epoch={response.get('epoch')} "
@@ -721,16 +987,24 @@ def run_member(args):
 
 def run_join(args):
     host, port = parse_host_port(args.auth_server)
+    member_ctx = new_member_context(args.drone_id)
+    rekey_server = start_member_rekey_listener(args, member_ctx)
 
     payload = {
         "event": "join",
         "drone_id": args.drone_id,
         "group_id": args.group_id,
+        "member_port": int(args.member_port),
         "timestamp": now(),
     }
 
     try:
-        response, elapsed_ms = send_request(host, port, payload)
+        response, elapsed_ms = send_request(host, port, payload, timeout=60)
+        kek_b64 = response.get("kek_b64")
+        if kek_b64:
+            with member_ctx["lock"]:
+                member_ctx["member_kek"] = _b64d(kek_b64)
+                member_ctx["epoch"] = response.get("epoch")
         log(
             f"joiner={args.drone_id} join_response={response} "
             f"join_time_ms={elapsed_ms:.3f}"
@@ -748,6 +1022,8 @@ def run_join(args):
             rekey_msgs=response.get("rekey_msgs", ""),
             crypto_ops=response.get("crypto_ops", ""),
             rekey_ms=response.get("rekey_ms", ""),
+            rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
+            rekey_bytes_total=response.get("rekey_bytes_total", ""),
         )
     except Exception as exc:
         log(f"joiner={args.drone_id} join_failed error={exc}")
@@ -765,6 +1041,8 @@ def run_join(args):
     start_t = time.time()
     while True:
         if args.duration and (time.time() - start_t) >= args.duration:
+            rekey_server.shutdown()
+            rekey_server.server_close()
             return
         time.sleep(5)
 
@@ -776,11 +1054,12 @@ def run_leave(args):
         "event": "leave",
         "drone_id": args.drone_id,
         "group_id": args.group_id,
+        "member_port": int(args.member_port),
         "timestamp": now(),
     }
 
     try:
-        response, elapsed_ms = send_request(host, port, payload)
+        response, elapsed_ms = send_request(host, port, payload, timeout=60)
         log(
             f"member={args.drone_id} leave_response={response} "
             f"leave_time_ms={elapsed_ms:.3f}"
@@ -798,6 +1077,8 @@ def run_leave(args):
             rekey_msgs=response.get("rekey_msgs", ""),
             crypto_ops=response.get("crypto_ops", ""),
             rekey_ms=response.get("rekey_ms", ""),
+            rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
+            rekey_bytes_total=response.get("rekey_bytes_total", ""),
         )
     except Exception as exc:
         log(f"member={args.drone_id} leave_failed error={exc}")
@@ -825,7 +1106,7 @@ def run_revoke(args):
     }
 
     try:
-        response, elapsed_ms = send_request(host, port, payload)
+        response, elapsed_ms = send_request(host, port, payload, timeout=60)
         log(
             f"target={args.target} revoke_response={response} "
             f"revocation_time_ms={elapsed_ms:.3f}"
@@ -843,6 +1124,8 @@ def run_revoke(args):
             rekey_msgs=response.get("rekey_msgs", ""),
             crypto_ops=response.get("crypto_ops", ""),
             rekey_ms=response.get("rekey_ms", ""),
+            rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
+            rekey_bytes_total=response.get("rekey_bytes_total", ""),
         )
     except Exception as exc:
         log(f"target={args.target} revoke_failed error={exc}")
@@ -872,6 +1155,24 @@ def main():
     parser.add_argument("--drone-id")
     parser.add_argument("--group-id", default="mission-alpha")
     parser.add_argument("--auth-server", default="10.0.0.100:9000")
+    parser.add_argument(
+        "--member-port",
+        type=int,
+        default=9100,
+        help="member listener port for rekey push messages",
+    )
+    parser.add_argument(
+        "--rekey-ack-timeout",
+        type=float,
+        default=2.0,
+        help="timeout in seconds for auth->member rekey push ACK",
+    )
+    parser.add_argument(
+        "--rekey-ack-retries",
+        type=int,
+        default=1,
+        help="number of retries per member for rekey push ACK",
+    )
     parser.add_argument("--event")
     parser.add_argument("--target")
     parser.add_argument(
