@@ -121,6 +121,8 @@ def emit_event(
     rekey_ms="",
     rekey_e2e_ms="",
     rekey_bytes_total="",
+    acks_received="",
+    acks_expected="",
     extra="",
 ):
     """
@@ -157,6 +159,8 @@ def emit_event(
                     "rekey_ms",
                     "rekey_e2e_ms",
                     "rekey_bytes_total",
+                    "acks_received",
+                    "acks_expected",
                     # ---------------------------------------
                     "extra",
                 ])
@@ -177,6 +181,8 @@ def emit_event(
                 f"{rekey_ms:.3f}" if isinstance(rekey_ms, (int, float)) else (rekey_ms or ""),
                 f"{rekey_e2e_ms:.3f}" if isinstance(rekey_e2e_ms, (int, float)) else (rekey_e2e_ms or ""),
                 rekey_bytes_total if rekey_bytes_total is not None else "",
+                acks_received if acks_received is not None else "",
+                acks_expected if acks_expected is not None else "",
                 extra,
             ])
 
@@ -1024,6 +1030,8 @@ def run_join(args):
             rekey_ms=response.get("rekey_ms", ""),
             rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
             rekey_bytes_total=response.get("rekey_bytes_total", ""),
+            acks_received=response.get("acks_received", ""),
+            acks_expected=response.get("acks_expected", ""),
         )
     except Exception as exc:
         log(f"joiner={args.drone_id} join_failed error={exc}")
@@ -1079,6 +1087,8 @@ def run_leave(args):
             rekey_ms=response.get("rekey_ms", ""),
             rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
             rekey_bytes_total=response.get("rekey_bytes_total", ""),
+            acks_received=response.get("acks_received", ""),
+            acks_expected=response.get("acks_expected", ""),
         )
     except Exception as exc:
         log(f"member={args.drone_id} leave_failed error={exc}")
@@ -1126,6 +1136,8 @@ def run_revoke(args):
             rekey_ms=response.get("rekey_ms", ""),
             rekey_e2e_ms=response.get("rekey_e2e_ms", ""),
             rekey_bytes_total=response.get("rekey_bytes_total", ""),
+            acks_received=response.get("acks_received", ""),
+            acks_expected=response.get("acks_expected", ""),
         )
     except Exception as exc:
         log(f"target={args.target} revoke_failed error={exc}")

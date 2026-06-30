@@ -7,7 +7,8 @@ Gera as duas figuras do paper a partir dos CSVs agregados produzidos por
 run_campaign.py:
 
     figure1_rekey_cost.csv
-        rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms
+        rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms,
+        rekey_e2e_ms, rekey_bytes_total, acks_received, acks_expected
 
     figure2_packet_loss.csv
         rekey_scheme, group_size, run_id, t_relative_s, loss_pct
@@ -27,6 +28,7 @@ Uso típico:
     python3 plot_figures.py --results-dir ./campaign-results
     python3 plot_figures.py --results-dir ./campaign-results --figure2-size 32
     python3 plot_figures.py --results-dir ./campaign-results --metric rekey_msgs
+    python3 plot_figures.py --results-dir ./campaign-results --metric rekey_e2e_ms
 """
 
 import argparse
@@ -52,7 +54,9 @@ SCHEME_STYLE = {
 METRIC_LABELS = {
     "rekey_msgs": "Rekey messages per revocation",
     "crypto_ops": "AES-GCM operations per revocation",
-    "rekey_ms":   "Rekey time per revocation (ms)",
+    "rekey_ms":   "Rekey CPU time per revocation (ms)",
+    "rekey_e2e_ms":      "End-to-end rekey latency per revocation (ms)",
+    "rekey_bytes_total": "Rekey bytes transmitted per revocation",
 }
 
 
@@ -355,7 +359,7 @@ def main():
         "--metric", default="rekey_msgs",
         choices=list(METRIC_LABELS.keys()),
         help="Figure 1 metric to plot (default: rekey_msgs). "
-             "Also try crypto_ops or rekey_ms."
+             "Also try crypto_ops, rekey_ms, rekey_e2e_ms, or rekey_bytes_total."
     )
     parser.add_argument(
         "--fig1-logy", action="store_true",
