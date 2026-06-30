@@ -163,30 +163,12 @@ def create_base_group_topology(
     drone_roles=None,
     auth_position="50,50,0",
     auth_range=130,
-    drone_range=100,
-    num_drones=4
+    drone_range=100
 ):
     """
-    Cria a topologia base reutilizável com auth central e N drones.
-
-    num_drones controla quantos drones são criados (padrão 4, preservando o
-    comportamento original). Para num_drones > 4, os drones extras (drone5,
-    drone6, ...) são criados programaticamente e ficam disponíveis via a lista
-    retornada em "drones". As chaves nomeadas "drone1".."drone4" continuam
-    presentes no dicionário de retorno quando num_drones >= 4, para manter
-    compatibilidade com os cenários topology_*.py existentes.
-
-    Posições:
-    - Os 4 primeiros drones mantêm as posições padrão históricas.
-    - Drones adicionais são distribuídos deterministicamente em um círculo ao
-      redor da posição do auth, dentro de drone_range, garantindo que comecem
-      no alcance de rádio do auth.
-
-    IPs: 10.0.0.<i>/24 para i em 1..N. O auth permanece em 10.0.0.100/24.
+    Cria a topologia base reutilizável com auth central e quatro drones.
     """
-    import math as _math
 
-    # Posições/roles padrão históricos para os 4 primeiros drones.
     default_positions = {
         "drone1": "30,50,0",
         "drone2": "40,60,0",
@@ -199,26 +181,6 @@ def create_base_group_topology(
         "drone3": "initial_member",
         "drone4": "initial_member"
     }
-
-    # Centro (posição do auth) para gerar drones extras em círculo.
-    try:
-        ax, ay, az = [float(v) for v in str(auth_position).split(",")]
-    except Exception:
-        ax, ay, az = 50.0, 50.0, 0.0
-
-    # Raio do círculo dos drones extras: metade do alcance do drone, para
-    # garantir que fiquem confortavelmente dentro do alcance do auth.
-    ring_radius = max(10.0, drone_range / 2.0)
-
-    # Gera posições/roles padrão para drones além de 4 (determinístico).
-    for i in range(5, num_drones + 1):
-        name = f"drone{i}"
-        # Distribui em círculo; ângulo determinístico pelo índice.
-        angle = 2.0 * _math.pi * ((i - 1) / max(1, num_drones))
-        x = ax + ring_radius * _math.cos(angle)
-        y = ay + ring_radius * _math.sin(angle)
-        default_positions[name] = f"{x:.1f},{y:.1f},0"
-        default_roles[name] = "initial_member"
 
     if drone_positions:
         default_positions.update(drone_positions)
@@ -234,32 +196,51 @@ def create_base_group_topology(
         range_=auth_range
     )
 
-    drones = []
-    named = {}
-    for i in range(1, num_drones + 1):
-        name = f"drone{i}"
-        drone = add_drone(
-            net,
-            name=name,
-            ip=f"10.0.0.{i}/24",
-            position=default_positions[name],
-            role=default_roles[name],
-            range_=drone_range
-        )
-        drones.append(drone)
-        named[name] = drone
+    drone1 = add_drone(
+        net,
+        name="drone1",
+        ip="10.0.0.1/24",
+        position=default_positions["drone1"],
+        role=default_roles["drone1"],
+        range_=drone_range
+    )
+    drone2 = add_drone(
+        net,
+        name="drone2",
+        ip="10.0.0.2/24",
+        position=default_positions["drone2"],
+        role=default_roles["drone2"],
+        range_=drone_range
+    )
+    drone3 = add_drone(
+        net,
+        name="drone3",
+        ip="10.0.0.3/24",
+        position=default_positions["drone3"],
+        role=default_roles["drone3"],
+        range_=drone_range
+    )
+    drone4 = add_drone(
+        net,
+        name="drone4",
+        ip="10.0.0.4/24",
+        position=default_positions["drone4"],
+        role=default_roles["drone4"],
+        range_=drone_range
+    )
 
+    drones = [drone1, drone2, drone3, drone4]
     stations = [auth] + drones
 
-    result = {
+    return {
         "auth": auth,
         "drones": drones,
         "stations": stations,
+        "drone1": drone1,
+        "drone2": drone2,
+        "drone3": drone3,
+        "drone4": drone4
     }
-    # Preserva as chaves nomeadas para compatibilidade (quando existirem).
-    result.update(named)
-
-    return result
 
 
 def configure_adhoc_network(
@@ -310,13 +291,13 @@ def start_network(net):
 
     info("*** Network started\n")
 
-
 def initialize_adhoc_experiment(
     net,
     stations,
     scenario,
     connectivity_nodes=None,
     auth=None,
+    rekey_scheme="naive",
     ssid="drone-adhoc-net",
     channel=5,
     mode="g",
@@ -347,7 +328,7 @@ def initialize_adhoc_experiment(
 
     if auth is not None:
         wait(auth_start_wait, "starting central authority")
-        start_auth_server(auth, scenario)
+        start_auth_server(auth, scenario, rekey_scheme=rekey_scheme)
 
 
 # ============================================================
@@ -373,17 +354,19 @@ def prepare_all(nodes, scenario):
 # Protocolo de autenticação em grupo
 # ============================================================
 
-def start_auth_server(auth, scenario):
+def start_auth_server(auth, scenario, rekey_scheme="naive"):
     """
     Inicia a autoridade central dentro do container auth.
+    rekey_scheme é repassado ao agente (naive ou lkh).
     """
 
-    info(f"*** Starting auth server in {auth.name}\n")
+    info(f"*** Starting auth server in {auth.name} (rekey_scheme={rekey_scheme})\n")
 
     auth.cmd(
         f"{PROTOCOL_BIN} "
         f"--role auth-server "
         f"--scenario {scenario} "
+        f"--rekey-scheme {rekey_scheme} "
         f"--listen 0.0.0.0 "
         f"--port 9000 "
         f"> /tmp/drone-logs/auth-server.log 2>&1 &"
@@ -526,10 +509,26 @@ def start_metrics_all(nodes, scenario):
 # Utilidades
 # ============================================================
 
-def wait(seconds, message):
-    info(f"\n*** Waiting {seconds}s: {message}\n")
-    sleep(seconds)
+# Escala global aplicada a todas as chamadas de wait().
+# Padrão 1.0 (comportamento idêntico ao original). Campanhas com --fast usam
+# um valor menor (ex.: 0.2) para reduzir a duração total sem alterar a lógica.
+_WAIT_SCALE = 1.0
 
+def set_wait_scale(scale):
+    """Define o multiplicador global de wait(). Use 1.0 para comportamento normal."""
+    global _WAIT_SCALE
+    try:
+        scale = float(scale)
+    except Exception:
+        scale = 1.0
+    if scale <= 0:
+        scale = 1.0
+    _WAIT_SCALE = scale
+
+def wait(seconds, message):
+    scaled = seconds * _WAIT_SCALE
+    info(f"\n*** Waiting {scaled:.2f}s: {message} (scale={_WAIT_SCALE})\n")
+    sleep(scaled)
 
 def test_connectivity(nodes):
     """
@@ -829,7 +828,28 @@ def parse_experiment_args(description="Drone group experiment"):
         help="Ping wait timeout in seconds per packet (default: 1)"
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--rekey-scheme", choices=["naive", "lkh"], default="naive",
+        help="Group rekeying scheme passed to the auth server: naive (O(n)) or lkh (O(log n)) (default: naive)"
+    )
+    parser.add_argument(
+        "--num-drones", type=int, default=4,
+        help="Number of drones in the topology (default: 4)"
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Shorten wait() durations to speed up large campaigns (default: off)"
+    )
+    parser.add_argument(
+        "--wait-scale", type=float, default=1.0,
+        help="Multiplier applied to every wait() duration (default: 1.0). --fast sets this to 0.2"
+    )
+    args = parser.parse_args()
+    # --fast é um atalho para encurtar drasticamente os waits da campanha.
+    if getattr(args, "fast", False) and args.wait_scale == 1.0:
+        args.wait_scale = 0.2
+    set_wait_scale(args.wait_scale)
+    return args
 
 
 def run_experiment_runs(run_once, runs=1, cli=True):
@@ -921,3 +941,56 @@ def move_node_in_steps(node, target_position, steps=1, interval=1.0):
         node.setPosition(pos)
         if step < steps:
             sleep(interval)
+
+# ============================================================
+# Coleta de CSVs in-container para o host
+# ============================================================
+
+def collect_incontainer_csvs(
+    nodes,
+    run_id,
+    output_dir="./results",
+    files=("protocol_latency.csv", "traffic_loss.csv"),
+    logs_dir="/tmp/drone-logs",
+):
+    """
+    Copia CSVs gerados DENTRO dos containers (em logs_dir) para o host.
+
+    Para cada nó e cada arquivo em `files`, lê o conteúdo com `node.cmd("cat ...")`
+    e grava em:
+        <output_dir>/<scenario-run-dir>/<node.name>-<arquivo>
+    O run_id é embutido no nome para não sobrescrever entre runs.
+
+    Isso é necessário porque o orquestrador NÃO enxerga o /tmp do container
+    automaticamente. Falhas (arquivo ausente) são ignoradas silenciosamente.
+    """
+    dest_dir = os.path.join(output_dir, f"run-{run_id}")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception as e:
+        info(f"*** Warning: could not create CSV dest dir '{dest_dir}': {e}\n")
+        return
+
+    for node in nodes:
+        for fname in files:
+            src = f"{logs_dir}/{fname}"
+            try:
+                content = node.cmd(f"cat {src} 2>/dev/null")
+            except Exception as e:
+                info(f"*** Warning: failed to read {src} from {node.name}: {e}\n")
+                continue
+            if not content or not content.strip():
+                continue
+            # Nome de saída inclui run e nó; run_campaign sabe inferir o run_id
+            # a partir do diretório run-<id>.
+            base, ext = os.path.splitext(fname)
+            out_name = f"{node.name}-{base}{ext}"
+            out_path = os.path.join(dest_dir, out_name)
+            try:
+                with open(out_path, "w") as f:
+                    f.write(content)
+                info(f"*** Collected {src} from {node.name} -> {out_path}\n")
+            except Exception as e:
+                info(f"*** Warning: could not write {out_path}: {e}\n")
+
+
