@@ -43,13 +43,13 @@ Uso típico (encurtando os waits com --fast para a campanha não levar horas):
         --results-dir ./campaign-results \
         --fast
 """
-
 import argparse
 import csv
 import glob
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 # Cenário usado na campanha (o que tem adversário/revogação).
 REVOCATION_TOPOLOGY = "topology_group_revocation.py"
@@ -155,7 +155,54 @@ def _run_id_from_path(path, fallback):
         except Exception:
             pass
     return fallback
+    
+def _iso_to_epoch(ts):
+    """
+    Converte um timestamp ISO-8601 (como gravado em protocol_latency.csv,
+    ex.: '2026-06-30T12:34:56.789012Z') para epoch (segundos, float).
 
+    Tolera o sufixo 'Z' (UTC) e ausência de timezone. Retorna None se não
+    conseguir parsear.
+    """
+    if not ts:
+        return None
+    s = ts.strip()
+    # datetime.fromisoformat não aceita 'Z' até 3.11; normaliza para +00:00.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _revoke_epoch_by_run(cell_dir):
+    """
+    Mapeia run_id -> epoch do evento de revoke, lendo os protocol_latency.csv
+    da célula. Usado para alinhar t_relative_s = window_start - t_revoke.
+
+    Se um run tiver múltiplos eventos de revoke (não deveria, no cenário atual),
+    usa o primeiro encontrado. Runs sem revoke ficam fora do mapa.
+    """
+    mapping = {}
+    for idx, path in enumerate(_find_protocol_csvs(cell_dir)):
+        run_id = _run_id_from_path(path, idx)
+        if run_id in mapping:
+            continue
+        try:
+            with open(path, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("event") != "revoke":
+                        continue
+                    epoch = _iso_to_epoch(row.get("timestamp_utc"))
+                    if epoch is not None:
+                        mapping[run_id] = epoch
+                        break
+        except Exception as exc:
+            info(f"  [align] could not read revoke time from {path}: {exc}")
+    return mapping
 
 def consolidate_figure1(scheme, size, cell_dir, writer):
     """
@@ -200,9 +247,14 @@ def consolidate_figure1(scheme, size, cell_dir, writer):
 
 def consolidate_figure2(scheme, size, cell_dir, writer):
     """
-    Lê os traffic_loss.csv da célula e escreve janelas de perda alinhadas no
-    tempo (t_relative_s relativo ao início da série de janelas do run) em
-    figure2_packet_loss.csv.
+    Lê os traffic_loss.csv da célula e escreve janelas de perda com tempo
+    relativo AO INSTANTE DO REVOKE (t_relative_s = window_start - t_revoke)
+    em figure2_packet_loss.csv.
+
+    Para alinhar, lê o epoch do evento de revoke de cada run a partir dos
+    protocol_latency.csv da mesma célula. Se o revoke daquele run não for
+    encontrado, cai no comportamento antigo (t relativo à primeira janela do
+    run) e avisa — assim a figura nunca fica vazia por falta de alinhamento.
     """
     csvs = _find_loss_csvs(cell_dir)
     if not csvs:
@@ -212,6 +264,9 @@ def consolidate_figure2(scheme, size, cell_dir, writer):
         )
         return 0
 
+    # run_id -> epoch do revoke (t=0).
+    revoke_epoch = _revoke_epoch_by_run(cell_dir)
+
     n_rows = 0
     for idx, path in enumerate(csvs):
         run_id = _run_id_from_path(path, idx)
@@ -219,28 +274,42 @@ def consolidate_figure2(scheme, size, cell_dir, writer):
             with open(path, newline="") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-            # Usa window_start para criar um tempo relativo ao primeiro janela.
+
+            # window_start de cada linha (epoch).
             starts = []
             for row in rows:
                 try:
                     starts.append(float(row.get("window_start")))
                 except Exception:
                     starts.append(None)
-            base = None
-            for s in starts:
-                if s is not None:
-                    base = s
-                    break
+
+            # t=0 preferencial: instante do revoke deste run.
+            base = revoke_epoch.get(run_id)
+            aligned_to_revoke = base is not None
+
+            if not aligned_to_revoke:
+                # Fallback: primeira janela do run (comportamento antigo).
+                for s in starts:
+                    if s is not None:
+                        base = s
+                        break
+                info(
+                    f"  [figure2] revoke time not found for "
+                    f"scheme={scheme} N={size} run={run_id}; "
+                    f"falling back to first-window alignment"
+                )
+
             for row, s in zip(rows, starts):
                 if s is not None and base is not None:
                     t_rel = s - base
+                    t_rel_str = f"{t_rel:.3f}"
                 else:
-                    t_rel = ""
+                    t_rel_str = ""
                 writer.writerow({
                     "rekey_scheme": scheme,
                     "group_size": size,
                     "run_id": run_id,
-                    "t_relative_s": f"{t_rel:.3f}" if t_rel != "" else "",
+                    "t_relative_s": t_rel_str,
                     "loss_pct": row.get("loss_pct", ""),
                 })
                 n_rows += 1
