@@ -4,7 +4,7 @@
 > cenários exploratórios (`results/<scenario>-run-N-metrics.csv`).
 >
 > Para o **custo de rekeying (naïve vs. LKH)** medido pela campanha — mensagens,
-> operações criptográficas e tempo de re-chaveamento — veja
+> operações criptográficas, latência end-to-end, bytes transmitidos e ACKs — veja
 > **[`../README.md`](../README.md)** e **[`../RELATORIO_TESTBED.md`](../RELATORIO_TESTBED.md)**.
 
 As métricas geradas por estes cenários têm dois objetivos principais:
@@ -231,7 +231,30 @@ avaliar o impacto da revogação lógica de um drone malicioso
 
 ---
 
-## 6. O que estas métricas (RTT/eventos) não medem
+## 6. Métricas de custo de rekeying — `protocol_latency.csv` e `figure1_rekey_cost.csv`
+
+As métricas de RTT/eventos deste documento são exploratórias. Já o custo de
+rekeying da campanha principal é consolidado a partir dos eventos `join/leave/revoke`
+do `protocol_latency.csv` e exportado em `figure1_rekey_cost.csv`.
+
+Campos principais de custo de rekey:
+
+| Campo | Significado |
+|---|---|
+| `rekey_e2e_ms` | **Latência end-to-end** do rekey (ms): do início do evento até o último ACK. **Métrica principal** de desempenho de rede. |
+| `rekey_bytes_total` | Total de bytes transmitidos no rekey (carga total no canal). Não é throughput. |
+| `acks_received` | Quantos membros confirmaram o recebimento da nova chave (ACK). |
+| `acks_expected` | Quantos ACKs eram esperados (membros alvo do push). |
+| `rekey_msgs` | Contador de mensagens de rekey (complexidade observada; naïve O(n), LKH O(log n)). |
+| `crypto_ops` | Contador de operações criptográficas AES-GCM usadas no rekey. |
+| `rekey_ms` | Tempo de CPU local do auth para gerar+cifrar o rekey. **Métrica secundária** de referência (medida no host, não em hardware real de drone). |
+
+`acks_received < acks_expected` indica run incompleto (ACKs ausentes/timeout),
+útil para filtrar ou qualificar análises.
+
+---
+
+## 7. O que estas métricas (RTT/eventos) não medem
 
 Estas métricas de RTT/eventos, por si só, **não medem**:
 
@@ -239,15 +262,15 @@ Estas métricas de RTT/eventos, por si só, **não medem**:
 - jitter de aplicação;
 - consumo de CPU/memória.
 
-> Atenção: o **custo criptográfico de rekeying** (tempo de re-chaveamento
-> `rekey_ms`, número de operações AES-GCM `crypto_ops` e de mensagens
-> `rekey_msgs`) **passou a ser medido** pelo `group_auth.py` dentro do container
-> e é consolidado pela campanha (`run_campaign.py` → `figure1_rekey_cost.csv`).
-> Ele simplesmente não aparece neste CSV de RTT/eventos. Veja o README principal.
+> Atenção: o **custo de rekeying** agora é medido com transmissão real na rede
+> (`rekey_e2e_ms`, `rekey_bytes_total`, `acks_received`, `acks_expected`,
+> além de `rekey_msgs`, `crypto_ops`, `rekey_ms`) e consolidado pela campanha
+> (`run_campaign.py` → `figure1_rekey_cost.csv`). Ele simplesmente não aparece
+> neste CSV de RTT/eventos exploratórios.
 
 ---
 
-## 7. Como interpretar os resultados
+## 8. Como interpretar os resultados
 
 Para análise inicial, observe principalmente:
 
@@ -270,7 +293,7 @@ Exemplo de perguntas que os CSVs ajudam a responder:
 
 ---
 
-## 8. Resumo em uma frase
+## 9. Resumo em uma frase
 
 As métricas exploratórias medem **a linha do tempo dos eventos do cenário** e a
 **latência RTT entre os nós da rede ad hoc**, permitindo avaliar como eventos de
