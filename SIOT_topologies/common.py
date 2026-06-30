@@ -828,7 +828,7 @@ def parse_experiment_args(description="Drone group experiment"):
         help="Ping wait timeout in seconds per packet (default: 1)"
     )
 
-        parser.add_argument(
+    parser.add_argument(
         "--rekey-scheme", choices=["naive", "lkh"], default="naive",
         help="Group rekeying scheme passed to the auth server: naive (O(n)) or lkh (O(log n)) (default: naive)"
     )
