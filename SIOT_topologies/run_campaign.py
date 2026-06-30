@@ -13,7 +13,8 @@ passando o esquema de rekey e o tamanho de grupo N, e consolida os resultados em
 dois CSVs prontos para plotar:
 
     figure1_rekey_cost.csv
-        rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms
+        rekey_scheme, group_size, run_id, rekey_msgs, crypto_ops, rekey_ms,
+        rekey_e2e_ms, rekey_bytes_total, acks_received, acks_expected
         (uma linha por evento de revoke por run)
 
     figure2_packet_loss.csv
@@ -229,6 +230,10 @@ def consolidate_figure1(scheme, size, cell_dir, writer):
                     rekey_msgs = row.get("rekey_msgs", "")
                     crypto_ops = row.get("crypto_ops", "")
                     rekey_ms = row.get("rekey_ms", "")
+                    rekey_e2e_ms = row.get("rekey_e2e_ms", "")
+                    rekey_bytes_total = row.get("rekey_bytes_total", "")
+                    acks_received = row.get("acks_received", "")
+                    acks_expected = row.get("acks_expected", "")
                     # group_size do CSV tem prioridade; senão usa o N da célula.
                     group_size = row.get("group_size") or size
                     writer.writerow({
@@ -238,6 +243,10 @@ def consolidate_figure1(scheme, size, cell_dir, writer):
                         "rekey_msgs": rekey_msgs,
                         "crypto_ops": crypto_ops,
                         "rekey_ms": rekey_ms,
+                        "rekey_e2e_ms": rekey_e2e_ms,
+                        "rekey_bytes_total": rekey_bytes_total,
+                        "acks_received": acks_received,
+                        "acks_expected": acks_expected,
                     })
                     n_rows += 1
         except Exception as exc:
@@ -386,6 +395,8 @@ def main():
         w1 = csv.DictWriter(f1, fieldnames=[
             "rekey_scheme", "group_size", "run_id",
             "rekey_msgs", "crypto_ops", "rekey_ms",
+            "rekey_e2e_ms", "rekey_bytes_total",
+            "acks_received", "acks_expected",
         ])
         w1.writeheader()
 

@@ -24,7 +24,7 @@ import os
 import socket
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 CSV_PATH = os.environ.get(
@@ -43,7 +43,7 @@ _LOSS_CSV_LOCK = threading.Lock()
 
 
 def now():
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat()
 
 
 def log(msg):
